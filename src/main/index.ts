@@ -1,15 +1,41 @@
-import { app, BrowserWindow, clipboard, ClipboardItem, ipcMain, Notification, shell } from 'electron'
+import { app, BrowserWindow, clipboard, ClipboardItem, ipcMain, nativeTheme, Notification, shell } from 'electron'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { checkLog, listOpenPrs, listPrs, postReview, prDetail } from './github'
+import { checkLog, listOpenPrs, listPrs, postReview, prDetail, rerunFailedJobs, rerunJob } from './github'
 import { discardDraft, getDraft, saveDraft } from './store'
 import { getPerformance, recordSnapshot } from './performance'
 import { cancelReview, runningReviews, startReview } from './review'
 import { getSettings, reviewDefaults, saveSettings } from './settings'
 import { learnVoice } from './voice'
-import type { PostRequest, PrList, PrSummary, ReviewDraft, ReviewProgress, Settings } from '../shared/types'
+import { clearStorage, revealStorage, storageUsage } from './storage'
+import type { PostRequest, PrList, PrSummary, ReviewDraft, ReviewProgress, Settings, Theme } from '../shared/types'
 
 let win: BrowserWindow | null = null
+
+// ---------- Appearance ----------
+// Setting nativeTheme.themeSource flips prefers-color-scheme in the renderer, so the CSS needs no other switch.
+const THEMES: readonly Theme[] = ['system', 'light', 'dark']
+const themeFile = (): string => join(app.getPath('userData'), 'theme.json')
+function loadTheme(): Theme {
+  try {
+    const t = JSON.parse(readFileSync(themeFile(), 'utf8')) as Theme
+    return THEMES.includes(t) ? t : 'system'
+  } catch {
+    return 'system'
+  }
+}
+// Matches --bg in styles.css, so the window does not flash a different colour while it loads.
+const windowBackground = (): string => (nativeTheme.shouldUseDarkColors ? '#0f0f11' : '#fafafa')
+ipcMain.handle('theme:get', () => nativeTheme.themeSource)
+ipcMain.handle('theme:set', (_e, theme: Theme) => {
+  if (!THEMES.includes(theme)) return
+  nativeTheme.themeSource = theme
+  try {
+    writeFileSync(themeFile(), JSON.stringify(theme))
+  } catch (e) {
+    console.error('could not save the theme:', e)
+  }
+})
 
 function createWindow(): void {
   win = new BrowserWindow({
@@ -19,7 +45,7 @@ function createWindow(): void {
     minHeight: 600,
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 16, y: 18 },
-    backgroundColor: '#1b1c1f',
+    backgroundColor: windowBackground(),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
@@ -132,10 +158,19 @@ ipcMain.handle('prs:open', async (_e, repos: string[]) => {
 })
 ipcMain.handle('performance:get', (_e, force: boolean) => getPerformance(!!force))
 ipcMain.handle('pr:detail', (_e, repo: string, number: number) => prDetail(repo, number))
+const validRepo = (repo: unknown): repo is string => typeof repo === 'string' && /^[\w.-]+\/[\w.-]+$/.test(repo)
 ipcMain.handle('check:log', (_e, repo: string, jobId: number) => {
-  if (typeof repo !== 'string' || !/^[\w.-]+\/[\w.-]+$/.test(repo) || !Number.isSafeInteger(jobId))
-    throw new Error('Not a valid check.')
+  if (!validRepo(repo) || !Number.isSafeInteger(jobId)) throw new Error('Not a valid check.')
   return checkLog(repo, jobId)
+})
+ipcMain.handle('check:rerun-job', (_e, repo: string, jobId: number) => {
+  if (!validRepo(repo) || !Number.isSafeInteger(jobId)) throw new Error('Not a valid check.')
+  return rerunJob(repo, jobId)
+})
+ipcMain.handle('check:rerun-failed', (_e, repo: string, runIds: number[]) => {
+  if (!validRepo(repo) || !Array.isArray(runIds) || !runIds.length || !runIds.every(Number.isSafeInteger))
+    throw new Error('Not a valid workflow run.')
+  return rerunFailedJobs(repo, runIds)
 })
 ipcMain.handle('settings:get', () => getSettings())
 ipcMain.handle('review:defaults', () => reviewDefaults())
@@ -153,6 +188,9 @@ ipcMain.handle('review:post', async (_e, req: PostRequest) => {
   if (draft) saveDraft({ ...draft, posted: { url: result.url, at: new Date().toISOString() } })
   return result
 })
+ipcMain.handle('storage:usage', () => storageUsage())
+ipcMain.handle('storage:clear', (_e, id: string) => clearStorage(id))
+ipcMain.handle('storage:reveal', () => revealStorage())
 ipcMain.handle('window:is-fullscreen', () => win?.isFullScreen() ?? false)
 ipcMain.handle('clipboard:write', (_e, text: string, html?: string) => {
   if (typeof text !== 'string') return
@@ -168,6 +206,8 @@ ipcMain.handle('open:external', (_e, url: string) => {
 })
 
 void app.whenReady().then(() => {
+  nativeTheme.themeSource = loadTheme()
+  nativeTheme.on('updated', () => win?.setBackgroundColor(windowBackground()))
   // A packaged app carries its own icon; in development the dock would show Electron's.
   if (!app.isPackaged) app.dock?.setIcon(join(__dirname, '../../build/icon.png'))
   createWindow()

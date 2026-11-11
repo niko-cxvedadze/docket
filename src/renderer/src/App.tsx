@@ -4,12 +4,74 @@ import { Dashboard } from './Dashboard'
 import { PrView } from './PrView'
 import { Performance } from './Performance'
 import { Settings } from './Settings'
+import { Storage } from './Storage'
 import { ago } from './util'
-import { RefreshCw } from 'lucide-react'
+import { Monitor, Moon, RefreshCw, Sun } from 'lucide-react'
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import type { Theme } from '../../shared/types'
 import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 
 const REFRESH_MS = 120_000
+
+const THEME_CHOICES: { value: Theme; label: string; Icon: typeof Sun }[] = [
+  { value: 'system', label: 'Match macOS', Icon: Monitor },
+  { value: 'light', label: 'Light', Icon: Sun },
+  { value: 'dark', label: 'Dark', Icon: Moon }
+]
+
+function ThemeSwitch() {
+  const [theme, setTheme] = useState<Theme>('system')
+  useEffect(() => void window.api.getTheme().then(setTheme), [])
+  return (
+    <ToggleGroup
+      type="single"
+      size="sm"
+      value={theme}
+      onValueChange={(v) => {
+        if (!v) return // clicking the chosen one again keeps it
+        setTheme(v as Theme)
+        void window.api.setTheme(v as Theme)
+      }}
+      aria-label="Appearance"
+    >
+      {THEME_CHOICES.map(({ value, label, Icon }) => (
+        <Tooltip key={value}>
+          <TooltipTrigger asChild>
+            <ToggleGroupItem value={value} aria-label={label} className="size-7 min-w-7 px-0">
+              <Icon className="size-3.5" aria-hidden />
+            </ToggleGroupItem>
+          </TooltipTrigger>
+          <TooltipContent>{label}</TooltipContent>
+        </Tooltip>
+      ))}
+    </ToggleGroup>
+  )
+}
+
+/** The number on the dock icon, with where it comes from. */
+function NeedsYou({ prs, onShow }: { prs: PrSummary[]; onShow: () => void }) {
+  const needs = prs.filter((p) => p.level !== 'waiting')
+  if (!needs.length) return null
+  const mine = needs.filter((p) => p.role === 'mine')
+  const reviews = needs.length - mine.length
+  const ready = mine.filter((p) => p.level === 'ready').length
+  const parts = [
+    mine.length && `${mine.length} of your pull requests${ready ? ` (${ready} ready to merge)` : ''}`,
+    reviews && `${reviews} ${reviews === 1 ? 'review' : 'reviews'} waiting on you`
+  ].filter(Boolean)
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Badge asChild className="cursor-pointer bg-action-bg text-action hover:bg-action-bg/80">
+          <button onClick={onShow}>{needs.length} need you</button>
+        </Badge>
+      </TooltipTrigger>
+      <TooltipContent>{parts.join(', ')}. This is the number on the dock icon.</TooltipContent>
+    </Tooltip>
+  )
+}
 
 export function App() {
   const [list, setList] = useState<PrList | null>(null)
@@ -18,7 +80,7 @@ export function App() {
   const [selected, setSelected] = useState<string | null>(null)
   // A pull request opened from "All open" is not in the main list, so keep what was clicked.
   const [opened, setOpened] = useState<PrSummary | null>(null)
-  const [page, setPage] = useState<'dashboard' | 'performance' | 'settings'>('dashboard')
+  const [page, setPage] = useState<'dashboard' | 'performance' | 'settings' | 'storage'>('dashboard')
   const [progress, setProgress] = useState<Record<string, ReviewProgress>>({})
   const busy = useRef(false)
   const [fullScreen, setFullScreen] = useState(false)
@@ -83,15 +145,28 @@ export function App() {
               <Button variant={page === 'settings' ? 'secondary' : 'ghost'} size="sm" onClick={() => setPage('settings')}>
                 Reviewer voice
               </Button>
+              <Button variant={page === 'storage' ? 'secondary' : 'ghost'} size="sm" onClick={() => setPage('storage')}>
+                Storage
+              </Button>
             </nav>
           )}
         </div>
         <div className="topbar-right">
           {list && (
+            <NeedsYou
+              prs={list.prs}
+              onShow={() => {
+                setSelected(null)
+                setPage('dashboard')
+              }}
+            />
+          )}
+          {list && (
             <span className="muted">
               {list.viewer}, updated {ago(list.fetchedAt)}
             </span>
           )}
+          <ThemeSwitch />
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
@@ -131,6 +206,8 @@ export function App() {
         <Performance />
       ) : page === 'settings' ? (
         <Settings />
+      ) : page === 'storage' ? (
+        <Storage onChanged={() => void refresh()} />
       ) : list ? (
         <Dashboard
           list={list}

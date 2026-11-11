@@ -227,17 +227,27 @@ function failingChecksOf(contexts: CheckContext[]): FailingCheck[] {
     const required = c.isRequired ?? null
     if (c.__typename === 'CheckRun' && c.conclusion && FAILED_CONCLUSIONS.has(c.conclusion)) {
       const workflow = c.checkSuite?.workflowRun?.workflow.name
-      const job = c.detailsUrl?.match(/\/actions\/runs\/\d+\/job\/(\d+)/)
+      const job = c.detailsUrl?.match(/\/actions\/runs\/(\d+)\/job\/(\d+)/)
       out.push({
         name: workflow && workflow !== c.name ? `${workflow} / ${c.name}` : (c.name ?? 'check'),
+        workflow: workflow ?? null,
         url: c.detailsUrl ?? null,
         required,
-        jobId: job ? Number(job[1]) : null
+        jobId: job ? Number(job[2]) : null,
+        runId: job ? Number(job[1]) : null
       })
     } else if (c.__typename === 'StatusContext' && (c.state === 'FAILURE' || c.state === 'ERROR')) {
-      out.push({ name: c.context ?? 'status', url: c.targetUrl ?? null, required, jobId: null })
+      out.push({ name: c.context ?? 'status', workflow: null, url: c.targetUrl ?? null, required, jobId: null, runId: null })
     }
   }
+  // A workflow that runs on both push and pull_request reports each job twice; show it once,
+  // keeping the copy branch protection requires.
+  const byName = new Map<string, FailingCheck>()
+  for (const c of out) {
+    const seen = byName.get(c.name)
+    if (!seen || (c.required === true && seen.required !== true)) byName.set(c.name, c)
+  }
+  out.splice(0, out.length, ...byName.values())
   // Required failures first: those are what stands between the pull request and a merge.
   return out.sort((a, b) => Number(b.required === true) - Number(a.required === true))
 }
@@ -612,9 +622,14 @@ export async function prDetail(repo: string, number: number): Promise<PrDetail> 
       body: string
       created_at: string
       html_url: string
+      in_reply_to_id?: number
     }[]
     for (const c of batch)
       comments.push({
+        replyTo: c.in_reply_to_id ?? null,
+        thread: '',
+        resolved: null,
+        resolvedBy: null,
         id: c.id,
         path: c.path,
         line: c.line,
@@ -627,6 +642,20 @@ export async function prDetail(repo: string, number: number): Promise<PrDetail> 
         url: c.html_url
       })
     if (batch.length < 100) break
+  }
+  // Resolution lives only in GraphQL. Without it the comments still show, just without the label.
+  const threads = await reviewThreads(repo, number).catch((e) => {
+    console.error('could not load review threads:', e)
+    return new Map<number, ThreadInfo>()
+  })
+  const byId = new Map(comments.map((c) => [c.id, c]))
+  for (const c of comments) {
+    let root = c
+    for (let hops = 0; root.replyTo !== null && byId.has(root.replyTo) && hops < 100; hops++) root = byId.get(root.replyTo)!
+    const info = threads.get(c.id) ?? threads.get(root.id)
+    c.thread = info?.id ?? `c${root.id}`
+    c.resolved = info ? info.resolved : null
+    c.resolvedBy = info?.resolvedBy ?? null
   }
   return {
     body: pr.body ?? '',
@@ -667,6 +696,53 @@ export function logExcerpt(log: string): string {
     .join('\n')
 }
 
+interface ThreadInfo {
+  id: string
+  resolved: boolean
+  resolvedBy: string | null
+}
+
+const THREADS_QUERY = `
+query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $after) {
+        pageInfo { hasNextPage endCursor }
+        nodes { id isResolved resolvedBy { login } comments(first: 100) { nodes { databaseId } } }
+      }
+    }
+  }
+}`
+
+/** Each review comment's thread and whether that thread is resolved, keyed by the comment's REST id. */
+async function reviewThreads(repo: string, number: number): Promise<Map<number, ThreadInfo>> {
+  const [owner, name] = repo.split('/')
+  type Page = {
+    repository: {
+      pullRequest: {
+        reviewThreads: {
+          pageInfo: { hasNextPage: boolean; endCursor: string | null }
+          nodes: { id: string; isResolved: boolean; resolvedBy: { login: string } | null; comments: { nodes: { databaseId: number | null }[] } }[]
+        }
+      } | null
+    } | null
+  }
+  const out = new Map<number, ThreadInfo>()
+  let after: string | null = null
+  for (let page = 0; page < MAX_COMMENT_PAGES; page++) {
+    const data: Page = await graphql<Page>(THREADS_QUERY, { owner, name, number, after })
+    const threads = data.repository?.pullRequest?.reviewThreads
+    if (!threads) break
+    for (const t of threads.nodes) {
+      const info = { id: t.id, resolved: t.isResolved, resolvedBy: t.resolvedBy?.login ?? null }
+      for (const c of t.comments.nodes) if (c.databaseId !== null) out.set(c.databaseId, info)
+    }
+    if (!threads.pageInfo.hasNextPage) break
+    after = threads.pageInfo.endCursor
+  }
+  return out
+}
+
 /** Why a failed GitHub Actions job failed: the step that broke and the log around its first error. */
 export async function checkLog(repo: string, jobId: number): Promise<CheckLog> {
   const base = `/repos/${repo}/actions/jobs/${jobId}`
@@ -686,6 +762,32 @@ export async function checkLog(repo: string, jobId: number): Promise<CheckLog> {
           ? `the job ${job.value.conclusion === 'cancelled' ? 'was cancelled' : 'ended'} before it ran any steps`
           : (log.reason as Error).message
   }
+}
+
+const rerunError = (e: unknown): Error => {
+  const msg = (e as Error).message
+  if (/already running/i.test(msg)) return new Error('That workflow run is already running again. Wait for it to finish.')
+  if (/GitHub 40[34]: (Resource not accessible|Must have admin rights|Not Found)/i.test(msg))
+    return new Error(`You do not have permission to re-run workflows in this repository. (${msg})`)
+  return e as Error
+}
+
+/** Re-run one failed GitHub Actions job (and the jobs that depend on it). */
+export async function rerunJob(repo: string, jobId: number): Promise<void> {
+  try {
+    await gh(`/repos/${repo}/actions/jobs/${jobId}/rerun`, { method: 'POST' })
+  } catch (e) {
+    throw rerunError(e)
+  }
+}
+
+/** Re-run every failed job in these GitHub Actions workflow runs. */
+export async function rerunFailedJobs(repo: string, runIds: number[]): Promise<void> {
+  const results = await Promise.allSettled(
+    [...new Set(runIds)].map((id) => gh(`/repos/${repo}/actions/runs/${id}/rerun-failed-jobs`, { method: 'POST' }))
+  )
+  const failed = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+  if (failed.length) throw rerunError(failed[0].reason)
 }
 
 const MAX_VOICE_SAMPLES = 120

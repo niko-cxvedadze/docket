@@ -12,12 +12,17 @@ export interface Reason {
 }
 
 export interface FailingCheck {
+  /** "Workflow / job" for GitHub Actions jobs, otherwise the check or status name. */
   name: string
+  /** The GitHub Actions workflow the job belongs to; null for other kinds of checks. */
+  workflow?: string | null
   url: string | null
   /** Whether branch protection requires this check to pass before merging. Null when GitHub did not say. */
   required: boolean | null
-  /** The GitHub Actions job behind this check, when there is one; its log can be fetched. */
+  /** The GitHub Actions job behind this check, when there is one; its log can be fetched and it can be re-run. */
   jobId: number | null
+  /** The GitHub Actions workflow run the job belongs to. */
+  runId: number | null
 }
 
 /** Why one failed GitHub Actions job failed. */
@@ -99,6 +104,14 @@ export interface ExistingComment {
   body: string
   createdAt: string
   url: string
+  /** The comment this one answers; null for the comment that started the thread. */
+  replyTo: number | null
+  /** The review thread it belongs to, the same for every comment in it. */
+  thread: string
+  /** Whether the thread is marked resolved. Null when GitHub did not say. */
+  resolved: boolean | null
+  /** Who resolved the thread. */
+  resolvedBy: string | null
 }
 
 export interface PrDetail {
@@ -241,6 +254,29 @@ export interface Settings {
   review: ReviewOptions
 }
 
+/** Follow macOS, or force one appearance. */
+export type Theme = 'system' | 'light' | 'dark'
+
+/** One thing Docket keeps on disk, as shown on the Storage page. */
+export interface StorageItem {
+  /** What clearStorage takes: "repo:<dir>", "drafts:open", "drafts:posted", "history", "snapshots", "cache", ... */
+  id: string
+  group: 'repos' | 'data' | 'app'
+  label: string
+  detail: string
+  bytes: number
+  /** For repository clones, when a review last fetched into it. */
+  lastUsed?: string
+  clearable: boolean
+}
+
+export interface StorageUsage {
+  /** The app's data folder. */
+  path: string
+  total: number
+  items: StorageItem[]
+}
+
 export interface Api {
   getSettings(): Promise<Settings>
   /** What the claude CLI uses when no model or effort is chosen, read from the user's Claude Code settings. Empty when unknown. */
@@ -255,6 +291,10 @@ export interface Api {
   listOpenPrs(repos: string[]): Promise<{ prs: PrSummary[]; truncated: boolean }>
   prDetail(repo: string, number: number): Promise<PrDetail>
   checkLog(repo: string, jobId: number): Promise<CheckLog>
+  /** Re-run one failed GitHub Actions job. */
+  rerunJob(repo: string, jobId: number): Promise<void>
+  /** Re-run the failed jobs of these GitHub Actions workflow runs. */
+  rerunFailedJobs(repo: string, runIds: number[]): Promise<void>
   getDraft(key: string): Promise<ReviewDraft | null>
   saveDraft(draft: ReviewDraft): Promise<void>
   discardDraft(key: string): Promise<void>
@@ -265,7 +305,13 @@ export interface Api {
   /** Put text on the clipboard, optionally with a rich (HTML) version for apps that accept it. */
   copyText(text: string, html?: string): Promise<void>
   openExternal(url: string): Promise<void>
+  storageUsage(): Promise<StorageUsage>
+  clearStorage(id: string): Promise<void>
+  /** Open the app's data folder in Finder. */
+  revealStorage(): Promise<void>
   onReviewProgress(cb: (p: ReviewProgress) => void): () => void
+  getTheme(): Promise<Theme>
+  setTheme(theme: Theme): Promise<void>
   isFullScreen(): Promise<boolean>
   onFullScreen(cb: (on: boolean) => void): () => void
 }

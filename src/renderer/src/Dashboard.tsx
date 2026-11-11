@@ -4,7 +4,7 @@ import { Badge } from '@/components/ui/badge'
 import { Card } from '@/components/ui/card'
 import { cn } from '@/lib/utils'
 import { ago } from './util'
-import { ExternalLink, Image as ImageIcon, Layers, Link2, Pin, Video } from 'lucide-react'
+import { ExternalLink, GitBranch, Image as ImageIcon, Layers, Link2, Pin, Video } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { StatusIcons } from './StatusIcons'
 import { Author } from './Author'
@@ -30,8 +30,8 @@ const REASON: Record<Level, string> = {
   waiting: 'text-muted-foreground font-medium'
 }
 
-/** Copy pull requests as titled links. `what` names them for the confirmation. */
-type Copy = (prs: PrSummary[], what: 'link' | 'stack' | 'selection') => void
+/** Copy pull requests as titled links, or a pull request's branch name. `what` names them for the confirmation. */
+type Copy = (prs: PrSummary[], what: 'link' | 'stack' | 'selection' | 'branch') => void
 
 const escapeHtml = (s: string): string =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
@@ -87,6 +87,7 @@ function Row({
           if (e.key === 'x') onToggle()
           else if (e.key === 'p') onPin()
           else if (e.key === 'o') void window.api.openExternal(pr.url)
+          else if (e.key === 'b') onCopy([pr], 'branch')
           else if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault()
             onOpen()
@@ -181,6 +182,19 @@ function Row({
             variant="ghost"
             size="icon"
             className="size-6 shrink-0 text-muted-foreground hover:text-foreground"
+            title={`Copy branch ${pr.headRef} (press B)`}
+            aria-label={`Copy branch name of ${pr.title}`}
+            onClick={(e) => {
+              e.stopPropagation()
+              onCopy([pr], 'branch')
+            }}
+          >
+            <GitBranch aria-hidden />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-6 shrink-0 text-muted-foreground hover:text-foreground"
             title="Open on GitHub (press O)"
             aria-label={`Open ${pr.title} on GitHub`}
             onClick={(e) => {
@@ -208,7 +222,8 @@ function Column({
   onToggle,
   pins,
   onPin,
-  onCopy
+  onCopy,
+  hiddenNeeds = 0
 }: {
   pins: Set<string>
   onPin: (pr: PrSummary) => void
@@ -223,6 +238,8 @@ function Column({
   selection: Set<string>
   onToggle: (pr: PrSummary) => void
   onCopy: Copy
+  /** Pull requests that need you but are hidden by the filters. */
+  hiddenNeeds?: number
 }) {
   const needs = prs.filter((p) => p.level !== 'waiting')
   // Stacked pull requests are kept together; a stack sits with whichever of its members is most urgent.
@@ -280,6 +297,11 @@ function Column({
         <Badge variant="secondary" className={cn('rounded-full', needs.length > 0 && 'bg-action-bg text-action')}>
           {needs.length ? `${needs.length} need you` : 'nothing needs you'}
         </Badge>
+        {hiddenNeeds > 0 && (
+          <span className="text-xs font-normal tracking-normal text-muted-foreground">
+            {hiddenNeeds} more hidden by filters
+          </span>
+        )}
         {controls && <span className="ml-auto text-sm font-normal tracking-normal">{controls}</span>}
       </h2>
       {prs.length === 0 && <p className="py-4 text-muted-foreground">{emptyText}</p>}
@@ -374,6 +396,10 @@ export function Dashboard({ list, progress, onOpen }: Props) {
     return [...list.prs.filter((p) => p.role === 'mine'), ...review]
   }, [scope, list.prs, open.prs])
   const prs = useMemo(() => applyFilters(source, filters, progress), [source, filters, progress])
+  const hiddenNeeds = (role: PrSummary['role']): number => {
+    const count = (items: PrSummary[]): number => items.filter((p) => p.role === role && p.level !== 'waiting').length
+    return count(source) - count(prs)
+  }
 
   const [pins, setPins] = useState(loadPins)
   const togglePin = useCallback((pr: PrSummary) => {
@@ -398,8 +424,13 @@ export function Dashboard({ list, progress, onOpen }: Props) {
   }, [toast])
   const copy = useCallback<Copy>((items, what) => {
     if (!items.length) return
+    if (what === 'branch') {
+      const branch = items[0].headRef
+      void window.api.copyText(branch).then(() => setToast(`Copied branch ${branch}`))
+      return
+    }
     const { text, html } = linksFor(items, what === 'stack')
-    void window.api.copyText(text, html).then(() =>
+    void window.api.copyText(text, html).then(() => {
       setToast(
         what === 'stack'
           ? `Copied ${items.length} stack links`
@@ -407,7 +438,9 @@ export function Dashboard({ list, progress, onOpen }: Props) {
             ? 'Copied link'
             : `Copied ${items.length} links`
       )
-    )
+      // The selection was only made to copy it, so it is done once the links are on the clipboard.
+      if (what === 'selection') setSelection(new Set())
+    })
   }, [])
   const toggle = useCallback((pr: PrSummary) => {
     setSelection((prev) => {
@@ -475,6 +508,7 @@ export function Dashboard({ list, progress, onOpen }: Props) {
           title="Your pull requests"
           prs={prs.filter((p) => p.role === 'mine')}
           emptyText={filtering ? 'None of your pull requests match the filters.' : 'You have no open pull requests.'}
+          hiddenNeeds={hiddenNeeds('mine')}
           progress={progress}
           onOpen={onOpen}
           selection={selection}
@@ -497,6 +531,7 @@ export function Dashboard({ list, progress, onOpen }: Props) {
                   : 'Nobody is waiting on a review from you.'
             }
             quietTitle={scope === 'all' ? 'Not waiting on you' : undefined}
+            hiddenNeeds={hiddenNeeds('review')}
             controls={
               <Tabs value={scope} onValueChange={changeScope}>
                 <TabsList>

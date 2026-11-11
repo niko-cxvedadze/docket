@@ -1,5 +1,5 @@
 import { app } from 'electron'
-import { readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync, renameSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { graphql, searchCommits } from './github'
 import type { MergedPr, Performance, PrSummary, ReviewGiven, Snapshot } from '../shared/types'
@@ -299,4 +299,9 @@ export async function getPerformance(force: boolean): Promise<Performance> {
   const complete = isComplete(state, Date.now())
   if (!complete) startBackfill()
   return { ...state, snapshots, partial: !complete }
+}
+
+/** Delete stored history. Waits for any GitHub job in flight, so it cannot write the file back afterwards. */
+export function clearHistory(name: 'performance.json' | 'snapshots.json'): Promise<void> {
+  return serial(async () => rmSync(path(name), { force: true }))
 }

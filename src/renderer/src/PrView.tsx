@@ -11,7 +11,11 @@ import type {
 } from '../../shared/types'
 import { commentableLines, parsePatch, type DiffRow } from '../../shared/diff'
 import { ago, cleanError } from './util'
-import { MessageSquare, NotebookPen } from 'lucide-react'
+import { Check, ChevronRight, CircleCheck, CircleDot, Copy, MessageSquare, NotebookPen } from 'lucide-react'
+import { Badge } from '@/components/ui/badge'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
+import { cn } from '@/lib/utils'
+import { Button } from '@/components/ui/button'
 import { Author } from './Author'
 import { Description } from './Description'
 import { ReviewOptionsPicker } from './ReviewOptionsPicker'
@@ -96,24 +100,98 @@ function DraftCard({
   )
 }
 
-/** A comment that is already on GitHub, shown where it was made. */
-function ExistingCard({ comment, where }: { comment: ExistingComment; where?: string }) {
+/** A conversation already on GitHub: the first comment and its replies, in order. */
+interface Thread {
+  id: string
+  comments: ExistingComment[]
+  resolved: boolean | null
+  resolvedBy: string | null
+}
+
+function threadsOf(comments: ExistingComment[]): Thread[] {
+  const map = new Map<string, Thread>()
+  for (const c of [...comments].sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
+    const key = c.thread || `c${c.id}`
+    let t = map.get(key)
+    if (!t) map.set(key, (t = { id: key, comments: [], resolved: c.resolved, resolvedBy: c.resolvedBy }))
+    t.comments.push(c)
+  }
+  return [...map.values()]
+}
+
+function ExistingCard({ comment, where, reply }: { comment: ExistingComment; where?: string; reply?: boolean }) {
   return (
-    <div className="existing">
-      <div className="draft-head">
+    <div className={cn('grid gap-1', reply && 'mt-2 border-t pt-2')}>
+      <div className="flex flex-wrap items-center gap-2 text-xs">
         <Author author={{ login: comment.author, avatarUrl: comment.avatarUrl }} className="font-semibold" />
-        <span className="muted">
+        <span className="text-muted-foreground">
           {ago(comment.createdAt)}
           {where ? `, ${where}` : ''}
         </span>
-        <button className="link-button" onClick={() => void window.api.openExternal(comment.url)}>
+        <Button variant="link" size="xs" className="ml-auto h-auto px-0" onClick={() => void window.api.openExternal(comment.url)}>
           On GitHub
-        </button>
+        </Button>
       </div>
       <div className="existing-body">{comment.body}</div>
     </div>
   )
 }
+
+/** Unresolved threads stay open and marked; resolved ones fold to one line, as on GitHub. */
+function ExistingThread({ thread, where }: { thread: Thread; where?: string }) {
+  const [open, setOpen] = useState(thread.resolved !== true)
+  const [first, ...replies] = thread.comments
+  const status =
+    thread.resolved === true ? (
+      <Badge variant="outline" className="gap-1 border-ready/40 bg-ready-bg text-ready">
+        <CircleCheck aria-hidden />
+        Resolved{thread.resolvedBy ? ` by ${thread.resolvedBy}` : ''}
+      </Badge>
+    ) : thread.resolved === false ? (
+      <Badge variant="outline" className="gap-1 border-action/40 bg-action-bg text-action">
+        <CircleDot aria-hidden />
+        Unresolved
+      </Badge>
+    ) : null
+  return (
+    <Collapsible
+      open={open}
+      onOpenChange={setOpen}
+      className={cn(
+        'existing border-l-[3px]',
+        thread.resolved === true ? 'border-l-ready/60 opacity-80' : thread.resolved === false ? 'border-l-action' : ''
+      )}
+    >
+      <div className="mb-1.5 flex items-center gap-2">
+        {status}
+        {!open && (
+          <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+            {first.author}: {first.body.split('\n')[0]}
+          </span>
+        )}
+        <CollapsibleTrigger asChild>
+          <Button variant="ghost" size="xs" className="ml-auto text-muted-foreground">
+            <ChevronRight className={cn('transition-transform', open && 'rotate-90')} aria-hidden />
+            {open
+              ? 'Hide'
+              : `Show ${thread.comments.length === 1 ? 'comment' : `${thread.comments.length} comments`}`}
+          </Button>
+        </CollapsibleTrigger>
+      </div>
+      <CollapsibleContent>
+        <ExistingCard comment={first} where={where} />
+        {replies.map((c) => (
+          <ExistingCard key={c.id} comment={c} reply />
+        ))}
+      </CollapsibleContent>
+    </Collapsible>
+  )
+}
+
+const countThreads = (threads: Thread[]): { open: number; resolved: number } => ({
+  open: threads.filter((t) => t.resolved !== true).length,
+  resolved: threads.filter((t) => t.resolved === true).length
+})
 
 const FileDiff = memo(function FileDiff({
   index,
@@ -145,19 +223,22 @@ const FileDiff = memo(function FileDiff({
     const lang = languageFor(file.path)
     return rows.map((r) => (r.type === 'hunk' ? '' : highlightLine(r.text, lang)))
   }, [rows, file.path])
-  // Where each GitHub comment belongs: on a new-side line, an old-side (deleted) line, or nowhere in this diff any more.
+  // Where each GitHub thread belongs: on a new-side line, an old-side (deleted) line, or nowhere in this diff any more.
+  // A thread sits where its first comment was made.
   const placed = useMemo(() => {
-    const right = new Map<number, ExistingComment[]>()
-    const left = new Map<number, ExistingComment[]>()
+    const right = new Map<number, Thread[]>()
+    const left = new Map<number, Thread[]>()
     const newLines = new Set(rows.filter((r) => r.type !== 'del' && r.type !== 'hunk').map((r) => r.newLine))
     const oldLines = new Set(rows.filter((r) => r.type === 'del').map((r) => r.oldLine))
-    const loose: ExistingComment[] = []
-    for (const c of existing) {
+    const loose: Thread[] = []
+    const threads = threadsOf(existing)
+    for (const t of threads) {
+      const c = t.comments[0]
       const [lines, map] = c.side === 'LEFT' ? [oldLines, left] : [newLines, right]
-      if (c.line !== null && lines.has(c.line)) map.set(c.line, [...(map.get(c.line) ?? []), c])
-      else loose.push(c)
+      if (c.line !== null && lines.has(c.line)) map.set(c.line, [...(map.get(c.line) ?? []), t])
+      else loose.push(t)
     }
-    return { right, left, loose }
+    return { right, left, loose, counts: countThreads(threads) }
   }, [rows, existing])
   return (
     <section className={viewed ? 'file viewed' : 'file'} id={`f-${index}`}>
@@ -170,9 +251,20 @@ const FileDiff = memo(function FileDiff({
           {file.path}
         </span>
         {/* Shown in the header so a folded file still says there is a conversation inside. */}
-        {existing.length > 0 && (
-          <span className="comment-count" title={`${existing.length} ${existing.length === 1 ? 'comment' : 'comments'} already on GitHub`}>
-            <MessageSquare aria-hidden /> {existing.length}
+        {placed.counts.open > 0 && (
+          <span
+            className="comment-count border-action/50 text-action"
+            title={`${placed.counts.open} unresolved ${placed.counts.open === 1 ? 'conversation' : 'conversations'} on GitHub`}
+          >
+            <MessageSquare aria-hidden /> {placed.counts.open}
+          </span>
+        )}
+        {placed.counts.resolved > 0 && (
+          <span
+            className="comment-count text-ready"
+            title={`${placed.counts.resolved} resolved ${placed.counts.resolved === 1 ? 'conversation' : 'conversations'}`}
+          >
+            <CircleCheck aria-hidden /> {placed.counts.resolved}
           </span>
         )}
         {drafts.length > 0 && (
@@ -199,8 +291,12 @@ const FileDiff = memo(function FileDiff({
       {open && placed.loose.length > 0 && (
         <div className="loose-comments">
           <p className="muted small">Comments on lines that have since changed or are outside this diff</p>
-          {placed.loose.map((c) => (
-            <ExistingCard key={c.id} comment={c} where={c.originalLine ? `was on line ${c.originalLine}` : undefined} />
+          {placed.loose.map((t) => (
+            <ExistingThread
+              key={t.id}
+              thread={t}
+              where={t.comments[0].originalLine ? `was on line ${t.comments[0].originalLine}` : undefined}
+            />
           ))}
         </div>
       )}
@@ -257,8 +353,8 @@ const FileDiff = memo(function FileDiff({
                     {(here.length > 0 || old.length > 0) && (
                       <tr className="thread">
                         <td colSpan={4}>
-                          {old.map((c) => (
-                            <ExistingCard key={c.id} comment={c} />
+                          {old.map((t) => (
+                            <ExistingThread key={t.id} thread={t} />
                           ))}
                           {here.map((c) => (
                             <DraftCard key={c.id} comment={c} readOnly={readOnly} onChange={onChange} onRemove={onRemove} />
@@ -301,6 +397,7 @@ export function PrView({ pr, progress, onDraftChanged }: Props) {
   const [detail, setDetail] = useState<PrDetail | null>(null)
   const [draft, setDraft] = useState<ReviewDraft | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [branchCopied, setBranchCopied] = useState(false)
   const [focus, setFocus] = useState('')
   // Path to the signature of the diff that was on screen when the file was marked viewed.
   const [viewedMarks, setViewedMarks] = useState(() => loadViewed(pr.key))
@@ -441,9 +538,18 @@ export function PrView({ pr, progress, onDraftChanged }: Props) {
     [detail, viewedMarks]
   )
   const discussion = useMemo(
-    () => new Map([...byFile.existing].map(([path, list]) => [path, list.length])),
+    () => new Map([...byFile.existing].map(([path, list]) => [path, countThreads(threadsOf(list))])),
     [byFile.existing]
   )
+  const conversations = useMemo(() => {
+    let open = 0
+    let resolved = 0
+    for (const c of discussion.values()) {
+      open += c.open
+      resolved += c.resolved
+    }
+    return { open, resolved }
+  }, [discussion])
   const commentCounts = useMemo(
     () => new Map([...byFile.drafts].map(([path, list]) => [path, list.length])),
     [byFile.drafts]
@@ -509,6 +615,11 @@ export function PrView({ pr, progress, onDraftChanged }: Props) {
   }
 
   const startReview = (): void => void window.api.startReview(pr, focus)
+  const copyBranch = (): void =>
+    void window.api.copyText(pr.headRef).then(() => {
+      setBranchCopied(true)
+      setTimeout(() => setBranchCopied(false), 1500)
+    })
   const jump = (id: string): void =>
     document.getElementById(id)?.scrollIntoView({ block: 'center', behavior: 'smooth' })
 
@@ -524,8 +635,18 @@ export function PrView({ pr, progress, onDraftChanged }: Props) {
             <span className="inline-flex items-center gap-1.5">
               by <Author author={pr.author} className="font-medium text-foreground" />
             </span>
-            <span className="mono">
-              {pr.headRef} into {pr.baseRef}
+            <span className="inline-flex items-center gap-1">
+              <Button
+                variant="ghost"
+                size="xs"
+                className="mono h-auto px-1 py-0.5 font-normal text-muted-foreground hover:text-foreground"
+                title="Copy branch name"
+                onClick={copyBranch}
+              >
+                {pr.headRef}
+                {branchCopied ? <Check className="text-ready" aria-hidden /> : <Copy aria-hidden />}
+              </Button>
+              <span className="mono">into {pr.baseRef}</span>
             </span>
             {pr.reasons.map((r, i) => (
               <span key={i} className={`reason level-${r.level}`}>
@@ -535,6 +656,21 @@ export function PrView({ pr, progress, onDraftChanged }: Props) {
           </p>
           <MergeStatus pr={pr} className="mt-2" />
           <CiDetails pr={pr} className="mt-2" />
+          {conversations.open + conversations.resolved > 0 && (
+            <p className="mt-2 flex items-center gap-3 text-xs">
+              <span className={cn('inline-flex items-center gap-1 font-medium', conversations.open ? 'text-action' : 'text-muted-foreground')}>
+                <CircleDot className="size-3.5" aria-hidden />
+                {conversations.open} unresolved
+              </span>
+              <span className="inline-flex items-center gap-1 text-ready">
+                <CircleCheck className="size-3.5" aria-hidden />
+                {conversations.resolved} resolved
+              </span>
+              <span className="text-muted-foreground">
+                {conversations.open + conversations.resolved === 1 ? 'conversation' : 'conversations'} on GitHub
+              </span>
+            </p>
+          )}
         </div>
         <button className="button quiet" onClick={() => void window.api.openExternal(pr.url)}>
           Open on GitHub

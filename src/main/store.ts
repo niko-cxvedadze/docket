@@ -34,3 +34,22 @@ export function discardDraft(key: string): void {
   delete load()[key]
   persist()
 }
+
+const isPosted = (d: ReviewDraft): boolean => !!d.posted
+
+/** How many drafts are kept, and roughly how much of drafts.json each kind takes. */
+export function draftStats(): Record<'open' | 'posted', { count: number; bytes: number }> {
+  const stats = { open: { count: 0, bytes: 0 }, posted: { count: 0, bytes: 0 } }
+  for (const d of Object.values(load())) {
+    const s = isPosted(d) ? stats.posted : stats.open
+    s.count++
+    s.bytes += Buffer.byteLength(JSON.stringify(d, null, 2))
+  }
+  return stats
+}
+
+export function clearDrafts(posted: boolean): void {
+  const all = load()
+  for (const [key, d] of Object.entries(all)) if (isPosted(d) === posted) delete all[key]
+  persist()
+}

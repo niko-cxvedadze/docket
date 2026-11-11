@@ -1,7 +1,9 @@
 import { useMemo, useState } from 'react'
-import { Check, ChevronDown, ChevronRight } from 'lucide-react'
+import { Check, CheckCheck, ChevronDown, ChevronRight } from 'lucide-react'
 import type { PrFile } from '../../shared/types'
 import { cn } from '@/lib/utils'
+
+const NO_DISCUSSION = { open: 0, resolved: 0 }
 
 interface Dir {
   name: string
@@ -59,7 +61,7 @@ function Folder({
   depth: number
   counts: Map<string, number>
   viewed: Set<string>
-  discussion: Map<string, number>
+  discussion: Map<string, { open: number; resolved: number }>
   onJump: (index: number) => void
 }) {
   const [open, setOpen] = useState(true)
@@ -93,7 +95,7 @@ function Entries({
   depth: number
   counts: Map<string, number>
   viewed: Set<string>
-  discussion: Map<string, number>
+  discussion: Map<string, { open: number; resolved: number }>
   onJump: (index: number) => void
 }) {
   return (
@@ -105,7 +107,7 @@ function Entries({
         const status = STATUS[file.status] ?? STATUS.modified
         const comments = counts.get(file.path) ?? 0
         const seen = viewed.has(file.path)
-        const posted = discussion.get(file.path) ?? 0
+        const posted = discussion.get(file.path) ?? NO_DISCUSSION
         return (
           <li key={file.path}>
             <button
@@ -124,13 +126,20 @@ function Entries({
                 {name}
               </span>
               {seen && <Check className="size-3.5 shrink-0 text-ready" aria-label="Viewed" />}
-              {posted > 0 && (
+              {posted.open > 0 ? (
                 <span
-                  className="rounded-full border px-1.5 text-[11px] font-semibold text-muted-foreground"
-                  title={`${posted} ${posted === 1 ? 'comment' : 'comments'} already on GitHub`}
+                  className="rounded-full border border-action/50 px-1.5 text-[11px] font-semibold text-action"
+                  title={`${posted.open} unresolved ${posted.open === 1 ? 'conversation' : 'conversations'}${posted.resolved ? `, ${posted.resolved} resolved` : ''}`}
                 >
-                  {posted}
+                  {posted.open}
                 </span>
+              ) : (
+                posted.resolved > 0 && (
+                  <CheckCheck
+                    className="size-3.5 shrink-0 text-ready"
+                    aria-label={`${posted.resolved} resolved ${posted.resolved === 1 ? 'conversation' : 'conversations'}`}
+                  />
+                )
               )}
               {comments > 0 && (
                 <span className="rounded-full bg-primary px-1.5 text-[11px] font-semibold text-primary-foreground">
@@ -159,7 +168,7 @@ export function FileTree({
   counts: Map<string, number>
   /** Paths the reviewer has marked as viewed. */
   viewed: Set<string>
-  discussion: Map<string, number>
+  discussion: Map<string, { open: number; resolved: number }>
   onJump: (index: number) => void
 }) {
   const root = useMemo(() => build(files), [files])

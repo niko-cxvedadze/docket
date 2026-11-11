@@ -16,6 +16,7 @@ import {
 import type { PrSummary, ReviewProgress } from '../../shared/types'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
+import { groupChecks } from './checkGroups'
 
 const list = (names: string[]): string =>
   names.length <= 2 ? names.join(' and ') : `${names[0]}, ${names[1]} and ${names.length - 2} more`
@@ -73,6 +74,7 @@ const Empty = ({ slot }: { slot: keyof typeof SLOT }) => <span className={cn('h-
  */
 export function StatusIcons({ pr, progress }: { pr: PrSummary; progress?: ReviewProgress }) {
   const failing = pr.failingChecks
+  const groups = groupChecks(failing)
   return (
     <div className="flex shrink-0 items-center gap-3">
       {pr.isDraft ? (
@@ -113,13 +115,14 @@ export function StatusIcons({ pr, progress }: { pr: PrSummary; progress?: Review
         >
           {failing.length > 0 && (
             <ul className="mt-1 grid gap-0.5">
-              {failing.slice(0, 6).map((c, i) => (
-                <li key={i} className="truncate">
-                  {c.name}
-                  {c.required === true && ' (required)'}
+              {groups.slice(0, 6).map((g) => (
+                <li key={g.key} className="truncate">
+                  {g.workflow ?? g.checks[0].label}
+                  {g.workflow && `: ${g.checks.length === 1 ? g.checks[0].label : `${g.checks.length} jobs`}`}
+                  {g.required === true && ' (required)'}
                 </li>
               ))}
-              {failing.length > 6 && <li>and {failing.length - 6} more</li>}
+              {groups.length > 6 && <li>and {groups.length - 6} more</li>}
             </ul>
           )}
         </Status>

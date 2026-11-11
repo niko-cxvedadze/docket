@@ -1,11 +1,12 @@
 import { useState } from 'react'
-import { ChevronRight, CircleAlert, CircleCheck, CircleDashed, CircleX } from 'lucide-react'
+import { ChevronRight, CircleAlert, CircleCheck, CircleDashed, CircleX, RotateCw } from 'lucide-react'
 import type { CheckLog, FailingCheck, PrSummary } from '../../shared/types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { cn } from '@/lib/utils'
 import { cleanError } from './util'
+import { groupChecks, type CheckGroup } from './checkGroups'
 
 type CiProps = Pick<PrSummary, 'ci' | 'failingChecks' | 'ciBlocksMerge'>
 
@@ -80,13 +81,37 @@ export function CiStatus({ pr, className, limit = 3 }: { pr: CiProps; className?
 
 const linkButton = 'h-auto rounded-sm px-1 py-0.5 text-[13px] font-normal'
 
-type LogState ={ state: 'loading' } | { state: 'error'; error: string } | { state: 'done'; log: CheckLog }
+type LogState = { state: 'loading' } | { state: 'error'; error: string } | { state: 'done'; log: CheckLog }
 
-function CheckRow({ repo, check, pr }: { repo: string; check: FailingCheck; pr: CiProps }) {
+type RerunState = { state: 'idle' } | { state: 'running' } | { state: 'started' } | { state: 'error'; error: string }
+
+/** Starts a re-run on GitHub and remembers how it went, so the button can say so. */
+function useRerun(start: () => Promise<void>): [RerunState, () => void] {
+  const [rerun, setRerun] = useState<RerunState>({ state: 'idle' })
+  const go = (): void => {
+    setRerun({ state: 'running' })
+    start().then(
+      () => setRerun({ state: 'started' }),
+      (e) => setRerun({ state: 'error', error: cleanError(e) })
+    )
+  }
+  return [rerun, go]
+}
+
+function RerunNote({ rerun }: { rerun: RerunState }) {
+  if (rerun.state === 'started')
+    return <span className="text-xs text-muted-foreground">Re-run started. The checks update on the next refresh.</span>
+  if (rerun.state === 'error') return <span className="text-xs text-danger">Could not re-run. {rerun.error}</span>
+  return null
+}
+
+function CheckRow({ repo, check, label, pr }: { repo: string; check: FailingCheck; label: string; pr: CiProps }) {
   const [open, setOpen] = useState(false)
   const [log, setLog] = useState<LogState | null>(null)
   const blocking = blocks(check, pr)
   const Icon = blocking ? CircleX : CircleAlert
+  const jobId = check.jobId
+  const [rerun, startRerun] = useRerun(() => window.api.rerunJob(repo, jobId!))
 
   const toggle = (): void => {
     setOpen(!open)
@@ -102,7 +127,7 @@ function CheckRow({ repo, check, pr }: { repo: string; check: FailingCheck; pr: 
     <li className="text-[13px]">
       <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5">
         <Icon className={cn('size-3.5 shrink-0', tone(blocking).text)} aria-hidden />
-        <span className="min-w-0 font-medium break-words">{check.name}</span>
+        <span className="min-w-0 font-medium break-words">{label}</span>
         {check.required !== null && (
           <span className={cn('text-xs', check.required ? 'font-semibold text-danger' : 'text-muted-foreground')}>
             {check.required ? 'Required' : 'Not required'}
@@ -118,6 +143,12 @@ function CheckRow({ repo, check, pr }: { repo: string; check: FailingCheck; pr: 
             Open run
           </Button>
         )}
+        {jobId !== null && rerun.state !== 'started' && (
+          <Button variant="link" className={linkButton} onClick={startRerun} disabled={rerun.state === 'running'}>
+            {rerun.state === 'running' ? 'Re-running…' : 'Re-run'}
+          </Button>
+        )}
+        <RerunNote rerun={rerun} />
       </div>
       {open && log && (
         <div className="mt-1.5 mb-1 ml-6 overflow-hidden rounded-md border bg-background">
@@ -148,8 +179,42 @@ function CheckRow({ repo, check, pr }: { repo: string; check: FailingCheck; pr: 
   )
 }
 
+/** One workflow's failed jobs under its name, with a button that re-runs them all. */
+function WorkflowGroup({ repo, group, pr }: { repo: string; group: CheckGroup; pr: CiProps }) {
+  const [rerun, startRerun] = useRerun(() => window.api.rerunFailedJobs(repo, group.runIds))
+  const runUrl = group.checks.find((c) => c.check.url)?.check.url?.replace(/\/job\/\d+.*$/, '')
+  const n = group.checks.length
+  return (
+    <li className="grid gap-1">
+      <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[13px]">
+        <span className="font-semibold">{group.workflow}</span>
+        <span className="text-xs text-muted-foreground">{n === 1 ? '1 failed job' : `${n} failed jobs`}</span>
+        {runUrl && (
+          <Button variant="link" className={linkButton} onClick={() => void window.api.openExternal(runUrl)}>
+            Open workflow run
+          </Button>
+        )}
+        {group.runIds.length > 0 && rerun.state !== 'started' && (
+          <Button variant="link" className={linkButton} onClick={startRerun} disabled={rerun.state === 'running'}>
+            {rerun.state === 'running' ? 'Re-running…' : n === 1 ? 'Re-run failed job' : 'Re-run failed jobs'}
+          </Button>
+        )}
+        <RerunNote rerun={rerun} />
+      </div>
+      <ul className="ml-1 grid gap-1 border-l pl-3">
+        {group.checks.map(({ check, label }, i) => (
+          <CheckRow key={check.url ?? `${check.name}-${i}`} repo={repo} check={check} label={label} pr={pr} />
+        ))}
+      </ul>
+    </li>
+  )
+}
+
 /** The pull request page's CI section: the verdict, whether it stops the merge, and each failed check with its log. */
 export function CiDetails({ pr, className }: { pr: PrSummary; className?: string }) {
+  // Lists saved by older versions have no run ids; those checks simply cannot be re-run from here.
+  const runIds = [...new Set(pr.failingChecks.map((c) => c.runId).filter((id): id is number => id != null))]
+  const [rerun, startRerun] = useRerun(() => window.api.rerunFailedJobs(pr.repo, runIds))
   if (pr.ci === 'none') return null
   if (pr.ci !== 'failure')
     return (
@@ -159,6 +224,7 @@ export function CiDetails({ pr, className }: { pr: PrSummary; className?: string
     )
   const required = pr.failingChecks.filter((c) => c.required).length
   const count = pr.failingChecks.length
+  const workflows = groupChecks(pr.failingChecks).filter((g) => g.workflow).length
   return (
     <Collapsible className={cn('grid gap-1.5', className)}>
       <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
@@ -175,16 +241,35 @@ export function CiDetails({ pr, className }: { pr: PrSummary; className?: string
             <Button variant="ghost" size="xs" className="group text-muted-foreground">
               <ChevronRight className="transition-transform group-data-[state=open]:rotate-90" aria-hidden />
               {count === 1 ? '1 failed check' : `${count} failed checks`}
+              {workflows > 1 && ` in ${workflows} workflows`}
             </Button>
           </CollapsibleTrigger>
         )}
+        {runIds.length > 0 && rerun.state !== 'started' && (
+          <Button
+            variant="ghost"
+            size="xs"
+            className="text-muted-foreground"
+            title="Re-run the failed GitHub Actions jobs of this pull request"
+            onClick={startRerun}
+            disabled={rerun.state === 'running'}
+          >
+            <RotateCw className={cn(rerun.state === 'running' && 'animate-spin')} aria-hidden />
+            {rerun.state === 'running' ? 'Re-running…' : 'Re-run failed jobs'}
+          </Button>
+        )}
+        <RerunNote rerun={rerun} />
       </div>
       {count > 0 && (
         <CollapsibleContent asChild>
-          <ul className="grid max-h-[40vh] gap-1 overflow-auto">
-            {pr.failingChecks.map((c, i) => (
-              <CheckRow key={c.url ?? `${c.name}-${i}`} repo={pr.repo} check={c} pr={pr} />
-            ))}
+          <ul className="grid max-h-[40vh] gap-2 overflow-auto">
+            {groupChecks(pr.failingChecks).map((g) =>
+              g.workflow ? (
+                <WorkflowGroup key={g.key} repo={pr.repo} group={g} pr={pr} />
+              ) : (
+                <CheckRow key={g.key} repo={pr.repo} check={g.checks[0].check} label={g.checks[0].label} pr={pr} />
+              )
+            )}
           </ul>
         </CollapsibleContent>
       )}
