@@ -121,7 +121,10 @@ function AuthorFilter({ prs, selected, onChange }: { prs: PrSummary[]; selected:
           variant="outline"
           size="sm"
           aria-label={`Authors: ${label}`}
-          className={cn('h-8 max-w-48 gap-1.5 bg-background text-[13px] font-normal', selected.length > 0 && 'border-primary font-medium')}
+          className={cn(
+            'h-8 min-w-0 max-w-48 shrink gap-1.5 bg-background text-[13px] font-normal',
+            selected.length > 0 && 'border-primary font-medium'
+          )}
         >
           <Users aria-hidden />
           <span className="truncate">{label}</span>
@@ -191,7 +194,7 @@ function Chip({
           variant="outline"
           size="sm"
           className={cn(
-            'h-8 gap-1.5 rounded-full bg-background px-3 text-[13px] font-normal text-muted-foreground shadow-none',
+            'h-8 shrink-0 gap-1.5 rounded-full bg-background px-3 text-[13px] font-normal text-muted-foreground shadow-none',
             'hover:border-muted-foreground/60 hover:bg-background hover:text-foreground',
             // The tooltip around it sets its own data-state, so the pressed look keys on aria-pressed instead.
             'aria-pressed:border-primary aria-pressed:bg-primary aria-pressed:font-medium aria-pressed:text-primary-foreground aria-pressed:hover:bg-primary/90 aria-pressed:hover:text-primary-foreground',
@@ -199,7 +202,7 @@ function Chip({
           )}
         >
           <Icon aria-hidden />
-          {children}
+          <span className="@max-6xl:sr-only">{children}</span>
           {count !== undefined && (
             <span
               className={cn(
@@ -289,7 +292,7 @@ export function FilterBar({
   const media = prs.filter((p) => p.preview).length
 
   return (
-    <div className="grid gap-2.5 rounded-lg border bg-card p-2.5" role="search" aria-label="Filter pull requests">
+    <div className="@container grid gap-2.5 rounded-lg border bg-card p-2.5" role="search" aria-label="Filter pull requests">
       {/* First row: what to look for and how urgent. */}
       <div className="flex flex-wrap items-center gap-2">
         <div className="relative min-w-56 flex-1">
@@ -325,13 +328,14 @@ export function FilterBar({
         </ToggleGroup>
       </div>
 
-      {/* Second row: narrowing dropdowns on the left, one-click toggles next, the tally on the right. */}
-      <div className="flex flex-wrap items-center gap-2">
+      {/* Second row: narrowing dropdowns on the left, one-click toggles next, the tally on the right.
+          It stays on one line: below @6xl the chips show only their icon and count, and the dropdowns truncate. */}
+      <div className="flex flex-nowrap items-center gap-2">
         <Select value={filters.ci} onValueChange={(v) => set({ ci: v as Filters['ci'] })}>
           <SelectTrigger
             size="sm"
             aria-label="CI status"
-            className={cn('bg-background text-[13px]', filters.ci !== 'all' && 'border-primary font-medium')}
+            className={cn('shrink-0 bg-background text-[13px]', filters.ci !== 'all' && 'border-primary font-medium')}
           >
             <SelectValue />
           </SelectTrigger>
@@ -349,7 +353,7 @@ export function FilterBar({
             <SelectTrigger
               size="sm"
               aria-label="Repository"
-              className={cn('max-w-56 bg-background text-[13px]', filters.repo && 'border-primary font-medium')}
+              className={cn('min-w-0 max-w-56 shrink bg-background text-[13px]', filters.repo && 'border-primary font-medium')}
             >
               <SelectValue />
             </SelectTrigger>
@@ -366,7 +370,7 @@ export function FilterBar({
 
         <AuthorFilter prs={prs} selected={filters.authors} onChange={(authors) => set({ authors })} />
 
-        <span className="mx-1 h-5 w-px bg-border" aria-hidden />
+        <span className="mx-1 h-5 w-px shrink-0 bg-border" aria-hidden />
 
         {(drafting > 0 || filters.drafting) && (
           <Chip
@@ -410,16 +414,22 @@ export function FilterBar({
           Hide draft PRs
         </Chip>
 
-        <span className="ml-auto flex items-center gap-1 text-xs text-muted-foreground">
+        <span className="ml-auto flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
           <span aria-live="polite" className="flex items-center gap-1">
             {active ? (
               <>
                 <span className="tabular-nums">
                   {shown} of {prs.length} shown
                 </span>
-                <Button variant="ghost" size="sm" className="h-7 gap-1 px-2 text-xs" onClick={() => onChange(NO_FILTERS)}>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 gap-1 px-2 text-xs"
+                  title="Clear filters"
+                  onClick={() => onChange(NO_FILTERS)}
+                >
                   <X aria-hidden />
-                  Clear filters
+                  <span className="@max-6xl:sr-only">Clear filters</span>
                 </Button>
               </>
             ) : (
