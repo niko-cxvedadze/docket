@@ -35,3 +35,17 @@ export function highlightLine(text: string, lang: string | null): string {
     return escape(text)
   }
 }
+
+/**
+ * Highlight a fenced code block from markdown. `lang` is what follows the fence ("ts", "python",
+ * "diff"); unknown or missing languages come back escaped and uncoloured.
+ */
+export function highlightBlock(text: string, lang: string | null): string {
+  const name = lang ? (hljs.getLanguage(lang) ? lang : BY_EXTENSION[lang.toLowerCase()]) : null
+  if (!name || !hljs.getLanguage(name) || text.length > 50_000) return escape(text)
+  try {
+    return hljs.highlight(text, { language: name, ignoreIllegals: true }).value
+  } catch {
+    return escape(text)
+  }
+}

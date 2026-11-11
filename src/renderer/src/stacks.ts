@@ -1,10 +1,12 @@
-import type { Level, PrSummary } from '../../shared/types'
+import type { Level, MergedStackPr, PrSummary } from '../../shared/types'
 
 /** Either one pull request on its own, or a stack: pull requests that build on each other's branches. */
 export interface Group {
   key: string
   /** In merge order: the first one targets the shared base branch, each next one targets the one before. */
   prs: PrSummary[]
+  /** Parts of the stack that have already merged, in merge order. They come before `prs`. */
+  merged: MergedStackPr[]
   /** Branch the bottom of the stack merges into. */
   base: string
   level: Level
@@ -50,10 +52,12 @@ export function groupStacks(prs: PrSummary[]): Group[] {
       for (const child of children.get(node.key) ?? []) walk(child)
     }
     walk(root)
+    const merged = root.mergedBelow ?? []
     groups.push({
       key: root.key,
       prs: members,
-      base: root.baseRef,
+      merged,
+      base: merged[0]?.baseRef ?? root.baseRef,
       level: members.reduce<Level>((best, m) => (rank[m.level] < rank[best] ? m.level : best), 'waiting')
     })
   }

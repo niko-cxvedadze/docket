@@ -1,27 +1,15 @@
-import { app } from 'electron'
-import { readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs'
-import { join } from 'node:path'
-import type { ReviewDraft } from '../shared/types'
+import { readStore, writeStore } from './persist'
+import type { PostedReview, ReviewDraft } from '../shared/types'
 
-const file = (): string => join(app.getPath('userData'), 'drafts.json')
+// Review drafts are the user's own work: see persist.ts for how they are kept safe.
 let drafts: Record<string, ReviewDraft> | null = null
 
 function load(): Record<string, ReviewDraft> {
-  if (drafts) return drafts
-  try {
-    drafts = JSON.parse(readFileSync(file(), 'utf8')) as Record<string, ReviewDraft>
-  } catch {
-    drafts = {}
-  }
+  drafts ??= readStore<Record<string, ReviewDraft>>('drafts.json', {})
   return drafts
 }
 
-function persist(): void {
-  mkdirSync(app.getPath('userData'), { recursive: true })
-  const tmp = `${file()}.tmp`
-  writeFileSync(tmp, JSON.stringify(drafts, null, 2))
-  renameSync(tmp, file())
-}
+const persist = (): void => writeStore('drafts.json', drafts, true)
 
 export const getDraft = (key: string): ReviewDraft | null => load()[key] ?? null
 
@@ -30,10 +18,28 @@ export function saveDraft(draft: ReviewDraft): void {
   persist()
 }
 
-export function discardDraft(key: string): void {
+export function discardDraft(key: string, why = 'unknown'): void {
+  const had = load()[key]
+  if (!had) return
+  // Logged, so a draft that disappears can be traced to what removed it.
+  console.warn(`draft discarded: ${key} (${why}; ${had.posted ? 'posted' : 'not posted'}, ${had.comments.length} comments)`)
   delete load()[key]
   persist()
 }
+
+// ---------- Posted reviews ----------
+// Written once when a review is posted and never removed with the draft, so the history survives
+// "Discard draft", "Start a new review" and a new Claude run.
+
+let reviews: PostedReview[] | null = null
+const loadReviews = (): PostedReview[] => (reviews ??= readStore<PostedReview[]>('reviews.json', []))
+
+export function recordPostedReview(review: PostedReview): void {
+  loadReviews().unshift(review)
+  writeStore('reviews.json', reviews, true)
+}
+
+export const listReviews = (key: string): PostedReview[] => loadReviews().filter((r) => r.key === key)
 
 const isPosted = (d: ReviewDraft): boolean => !!d.posted
 

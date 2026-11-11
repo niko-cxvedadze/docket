@@ -4,6 +4,7 @@ import type { StorageItem, StorageUsage } from '../../shared/types'
 import { Button } from '@/components/ui/button'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { ago, cleanError } from './util'
+import { toast } from 'sonner'
 
 // Files marked as viewed are kept in the window's localStorage, one entry per pull request ever opened.
 const VIEWED_PREFIX = 'docket.viewed.'
@@ -147,7 +148,6 @@ export function Storage({ onChanged }: { onChanged: () => void }) {
   const [loading, setLoading] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [note, setNote] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -171,12 +171,11 @@ export function Storage({ onChanged }: { onChanged: () => void }) {
 
   const clear = async (item: StorageItem): Promise<void> => {
     setBusy(item.id)
-    setNote(null)
     setError(null)
     try {
       if (item.id === VIEWED_ID) clearViewed()
       else await window.api.clearStorage(item.id)
-      setNote(`Cleared ${item.label.toLowerCase()}, freeing ${formatBytes(item.bytes)}.`)
+      toast.success(`Cleared ${item.label.toLowerCase()}`, { description: `Freed ${formatBytes(item.bytes)}.` })
       if (item.id.startsWith('drafts:')) onChanged()
     } catch (e) {
       setError(cleanError(e))
@@ -223,11 +222,6 @@ export function Storage({ onChanged }: { onChanged: () => void }) {
       {error && (
         <div className="banner error !mx-0 !mt-0 mb-4" role="alert">
           {error}
-        </div>
-      )}
-      {note && (
-        <div className="banner ok !mx-0 !mt-0 mb-4" role="status">
-          {note}
         </div>
       )}
 

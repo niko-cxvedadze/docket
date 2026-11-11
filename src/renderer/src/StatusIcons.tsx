@@ -102,7 +102,7 @@ export function StatusIcons({ pr, progress }: { pr: PrSummary; progress?: Review
       {pr.ci === 'none' && <Empty slot="checks" />}
       {pr.ci === 'success' && <Status slot="checks" Icon={CircleCheck} className="text-ready" text="Passing" label="Checks passed" />}
       {pr.ci === 'pending' && (
-        <Status slot="checks" Icon={LoaderCircle} className="text-muted-foreground [&>svg]:animate-spin [&>svg]:[animation-duration:1.4s] motion-reduce:[&>svg]:animate-none" text="Running" label="Checks running" />
+        <Status slot="checks" Icon={LoaderCircle} className="text-muted-foreground [&>svg]:animate-spin [&>svg]:[animation-duration:1.4s] motion-reduce:[&>svg]:animate-none" text="CI running" label="Checks running" />
       )}
       {pr.ci === 'failure' && (
         <Status

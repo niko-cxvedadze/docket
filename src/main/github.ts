@@ -57,6 +57,12 @@ export async function gh(path: string, init: RequestInit & { accept?: string } =
   return res
 }
 
+// When the pull request below in a stack merges, GitHub moves the next one onto its base branch and
+// records where it pointed before. That is how merged parts of a stack are found again.
+const BASE_CHANGES = `timelineItems(itemTypes: [BASE_REF_CHANGED_EVENT], last: 10) {
+    nodes { ... on BaseRefChangedEvent { createdAt previousRefName currentRefName } }
+  }`
+
 const PR_FIELDS = `
   number title url body isDraft updatedAt createdAt additions deletions changedFiles
   mergeable reviewDecision headRefOid headRefName baseRefName
@@ -66,6 +72,7 @@ const PR_FIELDS = `
   reviewThreads(first: 60) { nodes { isResolved comments(last: 1) { nodes { author { login } } } } }
   latestReviews(first: 30) { nodes { author { login } state commit { oid } } }
   reviewRequests(first: 20) { nodes { requestedReviewer { __typename ... on User { login } ... on Team { name } } } }
+  ${BASE_CHANGES}
 `
 
 const LIST_QUERY = `
@@ -170,6 +177,10 @@ export async function searchCommits(from: number, to: number): Promise<{ commits
   return { commits, truncated: true }
 }
 
+interface BaseChanges {
+  nodes: { createdAt?: string; previousRefName?: string; currentRefName?: string }[]
+}
+
 interface GqlPr {
   number: number
   title: string
@@ -192,6 +203,7 @@ interface GqlPr {
   reviewThreads: { nodes: { isResolved: boolean; comments: { nodes: { author: { login: string } | null }[] } }[] }
   latestReviews: { nodes: { author: { login: string } | null; state: string; commit: { oid: string } | null }[] }
   reviewRequests: { nodes: { requestedReviewer: { login?: string; name?: string } | null }[] }
+  timelineItems?: BaseChanges
 }
 
 function ciOf(pr: GqlPr): CiState {
@@ -530,7 +542,123 @@ export async function listPrs(): Promise<{ viewer: string; prs: PrSummary[] }> {
   for (const pr of groups.requested) add(pr, 'review', () => classifyReview(pr, me, true))
   for (const pr of groups.reviewed) add(pr, 'review', () => classifyReview(pr, me, false))
   prs.sort((a, b) => rank[a.level] - rank[b.level] || b.updatedAt.localeCompare(a.updatedAt))
+  try {
+    await attachMergedBelow(prs, [...groups.mine, ...groups.requested, ...groups.reviewed])
+  } catch (e) {
+    console.error('could not look up the merged parts of stacks:', e) // the list is still right without them
+  }
   return { viewer: me, prs }
+}
+
+// ---------- Merged parts of stacks ----------
+
+const MERGED_FIELDS = `number title url createdAt mergedAt additions deletions headRefName baseRefName ${BASE_CHANGES}`
+const MAX_STACK_DEPTH = 10
+const MISS_TTL_MS = 15 * 60_000
+
+interface GqlMerged {
+  number: number
+  title: string
+  url: string
+  createdAt: string
+  mergedAt: string | null
+  additions: number
+  deletions: number
+  headRefName: string
+  baseRefName: string
+  timelineItems?: BaseChanges
+}
+
+/** The branch this pull request sat on before GitHub moved it, and when that happened. */
+function previousBase(pr: { createdAt: string; baseRefName: string; timelineItems?: BaseChanges }) {
+  const moves = (pr.timelineItems?.nodes ?? []).filter((n) => n.previousRefName && n.currentRefName && n.createdAt)
+  // Walk back from the newest move to the one that put it on its current base.
+  const last = [...moves].reverse().find((n) => n.currentRefName === pr.baseRefName)
+  return last ? { ref: last.previousRefName!, onto: last.currentRefName!, at: last.createdAt!, since: pr.createdAt } : null
+}
+
+// Merged pull requests never change, so a hit is kept for good; a miss is asked again later.
+const mergedCache = new Map<string, { pr: GqlMerged | null; at: number }>()
+
+/**
+ * Look up, in one request, the merged pull request each branch came from. It must have merged into
+ * the branch the child was moved onto, after the child was opened and before (or as) it was moved.
+ */
+async function findMerged(
+  asks: { repo: string; ref: string; onto: string; at: string; since: string }[]
+): Promise<(GqlMerged | null)[]> {
+  const cacheKey = (a: (typeof asks)[number]): string => `${a.repo}:${a.ref}:${a.onto}:${a.at}`
+  const todo = asks.filter((a) => {
+    const hit = mergedCache.get(cacheKey(a))
+    return !hit || (!hit.pr && Date.now() - hit.at > MISS_TTL_MS)
+  })
+  if (todo.length) {
+    const vars: Record<string, string> = {}
+    const parts = todo.map((a, i) => {
+      const [owner, name] = a.repo.split('/')
+      Object.assign(vars, { [`o${i}`]: owner, [`n${i}`]: name, [`h${i}`]: a.ref, [`b${i}`]: a.onto })
+      return `r${i}: repository(owner: $o${i}, name: $n${i}) {
+        pullRequests(headRefName: $h${i}, baseRefName: $b${i}, states: MERGED, first: 5, orderBy: { field: UPDATED_AT, direction: DESC }) {
+          nodes { ${MERGED_FIELDS} }
+        }
+      }`
+    })
+    const decl = todo.map((_, i) => `$o${i}: String!, $n${i}: String!, $h${i}: String!, $b${i}: String!`).join(', ')
+    const data = await graphql<Record<string, { pullRequests: { nodes: GqlMerged[] } } | null>>(
+      `query(${decl}) { ${parts.join('\n')} }`,
+      vars
+    )
+    todo.forEach((a, i) => {
+      const atMs = new Date(a.at).getTime() + 60_000
+      const pr =
+        (data[`r${i}`]?.pullRequests.nodes ?? [])
+          .filter((m) => m.mergedAt && m.mergedAt >= a.since && new Date(m.mergedAt).getTime() <= atMs)
+          .sort((x, y) => y.mergedAt!.localeCompare(x.mergedAt!))[0] ?? null
+      mergedCache.set(cacheKey(a), { pr, at: Date.now() })
+    })
+  }
+  return asks.map((a) => mergedCache.get(cacheKey(a))?.pr ?? null)
+}
+
+/**
+ * For the bottom pull request of each stack, the parts below it that have already merged, oldest
+ * first. A pull request that was never moved onto another base gets none, so only stacks show them.
+ */
+async function attachMergedBelow(prs: PrSummary[], raw: GqlPr[]): Promise<void> {
+  const rawByKey = new Map(raw.map((r) => [keyOf(r), r]))
+  const openHeads = new Set(prs.map((p) => `${p.repo}:${p.headRef}`))
+  type Chain = { pr: PrSummary; merged: GqlMerged[]; next: ReturnType<typeof previousBase>; seen: Set<string> }
+  let chains: Chain[] = prs
+    .filter((p) => !openHeads.has(`${p.repo}:${p.baseRef}`)) // the bottom of its stack, or on its own
+    .map((p) => {
+      const r = rawByKey.get(p.key)
+      return { pr: p, merged: [], next: r ? previousBase(r) : null, seen: new Set([p.headRef]) }
+    })
+    .filter((c) => c.next && !openHeads.has(`${c.pr.repo}:${c.next.ref}`))
+  for (let depth = 0; depth < MAX_STACK_DEPTH && chains.length; depth++) {
+    const found = await findMerged(chains.map((c) => ({ repo: c.pr.repo, ...c.next! })))
+    const going: Chain[] = []
+    chains.forEach((c, i) => {
+      const m = found[i]
+      if (!m || c.seen.has(m.headRefName)) return
+      c.seen.add(m.headRefName)
+      c.merged.unshift(m)
+      c.pr.mergedBelow = c.merged.map((x) => ({
+        key: `${c.pr.repo}#${x.number}`,
+        number: x.number,
+        title: x.title,
+        url: x.url,
+        mergedAt: x.mergedAt!,
+        additions: x.additions,
+        deletions: x.deletions,
+        baseRef: x.baseRefName,
+        headRef: x.headRefName
+      }))
+      c.next = previousBase(m)
+      if (c.next) going.push(c)
+    })
+    chains = going
+  }
 }
 
 const OPEN_QUERY = `

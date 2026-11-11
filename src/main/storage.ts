@@ -5,6 +5,8 @@ import { join } from 'node:path'
 import { clearDrafts, draftStats } from './store'
 import { clearHistory } from './performance'
 import { runningReviews } from './review'
+import { chatStats, clearChats } from './chat'
+import { checkoutsInUse, worktreesDir } from './repo'
 import type { StorageItem, StorageUsage } from '../shared/types'
 
 const root = (): string => app.getPath('userData')
@@ -60,8 +62,10 @@ async function repoItems(): Promise<StorageItem[]> {
 export async function storageUsage(): Promise<StorageUsage> {
   const drafts = draftStats()
   const file = (name: string): Promise<number> => sizeOf(join(root(), name))
-  const [repos, history, snapshots, list, settings, cache, total] = await Promise.all([
+  const chats = chatStats()
+  const [repos, checkouts, history, snapshots, list, settings, cache, total] = await Promise.all([
     repoItems(),
+    sizeOf(worktreesDir()),
     file('performance.json'),
     file('snapshots.json'),
     file('prs.json'),
@@ -86,6 +90,24 @@ export async function storageUsage(): Promise<StorageUsage> {
       detail: `${drafts.posted.count} ${drafts.posted.count === 1 ? 'review' : 'reviews'} already on GitHub, kept so the dashboard can mark them as posted.`,
       bytes: drafts.posted.bytes,
       clearable: drafts.posted.count > 0
+    },
+    {
+      id: 'chats',
+      group: 'data',
+      label: 'Conversations with Claude',
+      detail: `${chats.count} ${chats.count === 1 ? 'conversation' : 'conversations'} about pull requests. Clearing them loses the conversations.`,
+      bytes: chats.bytes,
+      clearable: chats.count > 0
+    },
+    {
+      id: 'checkouts',
+      group: 'repos',
+      label: 'Pull request checkouts',
+      detail: checkoutsInUse()
+        ? 'Claude is reading one of them right now.'
+        : 'The code of each pull request you reviewed or asked about. Removed by themselves 3 days after the pull request leaves your dashboard; fetched again when needed.',
+      bytes: checkouts,
+      clearable: checkouts > 0 && !checkoutsInUse()
     },
     {
       id: 'history',
@@ -129,7 +151,9 @@ export async function storageUsage(): Promise<StorageUsage> {
     }
   ]
   // The draft rows are estimates of their share of drafts.json, so count the real file instead.
-  const counted = items.reduce((n, i) => n + i.bytes, 0) - drafts.open.bytes - drafts.posted.bytes + (await file('drafts.json'))
+  const counted =
+    items.reduce((n, i) => n + i.bytes, 0) - drafts.open.bytes - drafts.posted.bytes - chats.bytes +
+    (await file('drafts.json')) + (await file('chats.json'))
   items.push({
     id: 'other',
     group: 'app',
@@ -146,7 +170,8 @@ export async function clearStorage(id: string): Promise<void> {
   if (id.startsWith('repo:')) {
     const name = id.slice('repo:'.length)
     if (!/^[\w.-]+$/.test(name) || name.startsWith('.')) throw new Error('Not a repository clone.')
-    if (busyRepos().has(repoOf(name))) throw new Error('A review is running in this repository. Try again when it finishes.')
+    if (busyRepos().has(repoOf(name)) || checkoutsInUse())
+      throw new Error('Claude is reading code from this repository. Try again when it finishes.')
     const dir = join(reposDir(), name)
     if (!existsSync(dir)) return
     await rm(dir, { recursive: true, force: true })
@@ -157,6 +182,13 @@ export async function clearStorage(id: string): Promise<void> {
       return clearDrafts(false)
     case 'drafts:posted':
       return clearDrafts(true)
+    case 'chats':
+      clearChats()
+      return
+    case 'checkouts':
+      if (checkoutsInUse()) throw new Error('Claude is reading one of them. Try again when it finishes.')
+      await rm(worktreesDir(), { recursive: true, force: true })
+      return
     case 'history':
       return clearHistory('performance.json')
     case 'snapshots':

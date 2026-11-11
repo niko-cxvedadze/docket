@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
-import type { Api, ReviewProgress } from '../shared/types'
+import type { Api, ChatEvent, Notice, ReviewProgress } from '../shared/types'
 
 const api: Api = {
   getSettings: () => ipcRenderer.invoke('settings:get'),
@@ -15,8 +15,9 @@ const api: Api = {
   rerunFailedJobs: (repo, runIds) => ipcRenderer.invoke('check:rerun-failed', repo, runIds),
   getDraft: (key) => ipcRenderer.invoke('draft:get', key),
   saveDraft: (draft) => ipcRenderer.invoke('draft:save', draft),
-  discardDraft: (key) => ipcRenderer.invoke('draft:discard', key),
-  startReview: (pr, focus) => ipcRenderer.invoke('review:start', pr, focus),
+  discardDraft: (key, why) => ipcRenderer.invoke('draft:discard', key, why),
+  listReviews: (key) => ipcRenderer.invoke('reviews:list', key),
+  startReview: (pr, focus, mode) => ipcRenderer.invoke('review:start', pr, focus, mode),
   cancelReview: (key) => ipcRenderer.invoke('review:cancel', key),
   runningReviews: () => ipcRenderer.invoke('review:running'),
   postReview: (req) => ipcRenderer.invoke('review:post', req),
@@ -25,6 +26,27 @@ const api: Api = {
   storageUsage: () => ipcRenderer.invoke('storage:usage'),
   clearStorage: (id) => ipcRenderer.invoke('storage:clear', id),
   revealStorage: () => ipcRenderer.invoke('storage:reveal'),
+  listChats: (key) => ipcRenderer.invoke('chat:list', key),
+  sendChat: (pr, chatId, question) => ipcRenderer.invoke('chat:send', pr, chatId, question),
+  cancelChat: (chatId) => ipcRenderer.invoke('chat:cancel', chatId),
+  deleteChat: (chatId) => ipcRenderer.invoke('chat:delete', chatId),
+  onChatEvent: (cb) => {
+    const listener = (_e: IpcRendererEvent, ev: ChatEvent): void => cb(ev)
+    ipcRenderer.on('chat:event', listener)
+    return () => ipcRenderer.removeListener('chat:event', listener)
+  },
+  listNotices: () => ipcRenderer.invoke('notices:list'),
+  markNoticesRead: () => ipcRenderer.invoke('notices:read'),
+  onNotice: (cb) => {
+    const listener = (_e: IpcRendererEvent, n: Notice): void => cb(n)
+    ipcRenderer.on('notice', listener)
+    return () => ipcRenderer.removeListener('notice', listener)
+  },
+  onOpenNotice: (cb) => {
+    const listener = (_e: IpcRendererEvent, n: Notice): void => cb(n)
+    ipcRenderer.on('notice:open', listener)
+    return () => ipcRenderer.removeListener('notice:open', listener)
+  },
   getTheme: () => ipcRenderer.invoke('theme:get'),
   setTheme: (theme) => ipcRenderer.invoke('theme:set', theme),
   isFullScreen: () => ipcRenderer.invoke('window:is-fullscreen'),

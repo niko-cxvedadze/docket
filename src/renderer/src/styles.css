@@ -154,16 +154,6 @@
   .brand { font-size: 15px; font-weight: 650; letter-spacing: -0.01em; }
   .topbar-right { display: flex; align-items: center; gap: 12px; }
 
-  .button {
-    border: 1px solid var(--line); background: var(--panel);
-    padding: 5px 12px; border-radius: 6px; font-weight: 500;
-  }
-  .button:hover:not(:disabled) { border-color: var(--ink-muted); }
-  .button.primary { background: var(--brand); border-color: var(--brand); color: var(--brand-ink); }
-  .button.quiet { background: transparent; }
-  .link-button { border: 0; background: none; padding: 2px 4px; color: var(--brand); border-radius: 4px; }
-  .link-button:hover { text-decoration: underline; }
-  .link-button.danger { color: var(--danger); }
 
   .banner {
     margin: 10px 16px 0; padding: 8px 12px; border-radius: 6px;
@@ -171,7 +161,7 @@
   }
   .banner.error { background: var(--danger-bg); color: var(--danger); }
   .banner.ok { background: var(--ready-bg); color: var(--ready); }
-  .review-pane .banner, .diff-pane .banner { margin: 0 0 12px; }
+  .diff-pane .banner { margin: 0 0 12px; }
   .empty { padding: 48px 24px; text-align: center; color: var(--ink-muted); }
   .empty.small { padding: 16px; text-align: left; }
 
@@ -198,18 +188,6 @@
   }
   .file.viewed .file-head { border-bottom-color: transparent; }
   .file.viewed .file-path { color: var(--ink-muted); font-weight: 500; }
-  .viewed-toggle {
-    display: flex; align-items: center; gap: 5px; padding: 2px 8px; border: 1px solid var(--line);
-    border-radius: 5px; font-size: 12px; cursor: pointer; user-select: none; white-space: nowrap;
-  }
-  .viewed-toggle:hover { border-color: var(--ink-muted); }
-  .viewed-toggle.on { border-color: var(--ready); background: var(--ready-bg); color: var(--ready); font-weight: 600; }
-  .comment-count {
-    display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border: 1px solid var(--line);
-    border-radius: 999px; font-size: 12px; font-weight: 600; color: var(--ink-muted); white-space: nowrap;
-  }
-  .comment-count svg { width: 12px; height: 12px; }
-  .comment-count.draft { border-color: var(--brand); color: var(--brand); }
   .loose-comments { padding: 10px 12px; background: var(--sunken); border-bottom: 1px solid var(--line); font-size: 13px; }
   .loose-comments > p { margin-bottom: 8px; }
   .loose-comments .existing:last-child { margin-bottom: 0; }
@@ -244,11 +222,6 @@
   .diff .col-plus { width: 22px; }
   .diff td { padding: 0; vertical-align: top; }
   .diff .num { text-align: right; padding-right: 8px; color: var(--ink-muted); user-select: none; }
-  .diff .plus button {
-    width: 18px; height: 18px; line-height: 16px; padding: 0; border: 0; border-radius: 4px;
-    background: var(--brand); color: var(--brand-ink); font-weight: 700; opacity: 0;
-  }
-  .diff tr.row:hover .plus button, .diff .plus button:focus-visible { opacity: 1; }
   .diff .code { white-space: pre-wrap; overflow-wrap: anywhere; padding-right: 10px; }
   .diff .sign { display: inline-block; width: 14px; color: var(--ink-muted); user-select: none; }
   .row.add { background: var(--add-bg); }
@@ -280,30 +253,12 @@
   .thread .draft-card:last-child, .thread .existing:last-child { margin-bottom: 0; }
   .draft-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-bottom: 6px; }
   .draft-title { font-weight: 600; }
-  .existing-body { white-space: pre-wrap; overflow-wrap: anywhere; }
-  textarea, input[type='text'], .field input {
-    width: 100%; background: var(--bg); border: 1px solid var(--line); border-radius: 5px; padding: 6px 8px;
-  }
-  textarea { resize: vertical; line-height: 1.45; display: block; }
-  .draft-actions { display: flex; justify-content: space-between; align-items: center; margin-top: 6px; }
-  .check { display: flex; align-items: center; gap: 6px; }
 
   .severity { font-size: 11px; font-weight: 650; padding: 1px 7px; border-radius: 4px; background: var(--hunk-bg); color: var(--brand); }
   .severity.blocker { background: var(--danger-bg); color: var(--danger); }
   .severity.issue { background: var(--action-bg); color: var(--action); }
   .severity.nit, .severity.question { background: var(--sunken); color: var(--ink-muted); }
 
-  .review-pane { height: 100%; overflow: auto; padding: 16px 16px 40px; background: var(--panel); display: flex; flex-direction: column; gap: 12px; }
-  .review-pane h2 { font-size: 15px; font-weight: 650; }
-  .review-pane h3 { font-size: 13px; font-weight: 650; display: flex; gap: 8px; align-items: baseline; margin-top: 4px; }
-  .start { display: grid; gap: 12px; justify-items: start; }
-  .field { display: grid; gap: 5px; font-weight: 600; width: 100%; }
-  .field > * { font-weight: 400; }
-  .segmented { display: flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
-  .segmented button { flex: 1; border: 0; background: var(--bg); padding: 5px 6px; border-right: 1px solid var(--line); }
-  .segmented button:last-child { border-right: 0; }
-  .segmented button.on { background: var(--brand); color: var(--brand-ink); font-weight: 600; }
-  .review-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; width: 100%; }
   .finding-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
   /* One card per comment: a stripe in the severity's colour, where it is, then what it says. */
   .finding {
@@ -328,12 +283,7 @@
   }
   .finding.dropped { opacity: 0.55; border-left-color: var(--line); }
   .finding.dropped .finding-title { text-decoration: line-through; }
-  .review-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 4px; }
-  .confirm { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px; border: 1px solid var(--brand); border-radius: 6px; }
-  .confirm p { width: 100%; }
 
-  .progress { display: flex; align-items: center; gap: 10px; padding: 10px; background: var(--hunk-bg); border-radius: 6px; }
-  .progress span:nth-child(2) { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .spinner { width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--brand); border-top-color: transparent; animation: spin 0.8s linear infinite; flex: none; }
   @keyframes spin { to { transform: rotate(360deg); } }
   @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 4s; } }

@@ -485,12 +485,13 @@ export function Performance() {
                   {view.recent.map((m) => (
                     <TableRow key={m.key}>
                       <TableCell className="max-w-0">
-                        <button
-                          className="block w-full truncate text-left hover:underline"
+                        <Button
+                          variant="link"
+                          className="block h-auto w-full truncate p-0 text-left font-normal text-foreground"
                           onClick={() => void window.api.openExternal(m.url)}
                         >
                           {m.title}
-                        </button>
+                        </Button>
                         <span className="font-mono text-xs text-muted-foreground">{m.key}</span>
                       </TableCell>
                       <TableCell className="text-muted-foreground">{ago(m.mergedAt)}</TableCell>
@@ -521,12 +522,13 @@ export function Performance() {
                   {view.recentCommits.map((c) => (
                     <TableRow key={c.sha}>
                       <TableCell className="max-w-0">
-                        <button
-                          className="block w-full truncate text-left hover:underline"
+                        <Button
+                          variant="link"
+                          className="block h-auto w-full truncate p-0 text-left font-normal text-foreground"
                           onClick={() => void window.api.openExternal(c.url)}
                         >
                           {c.message}
-                        </button>
+                        </Button>
                         <span className="font-mono text-xs text-muted-foreground">{c.sha.slice(0, 7)}</span>
                       </TableCell>
                       <TableCell className="max-w-0 truncate text-muted-foreground">{c.repo}</TableCell>

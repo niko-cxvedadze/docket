@@ -1,4 +1,7 @@
 import { useMemo, useState } from 'react'
+import { ChevronRight } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { cn } from '@/lib/utils'
 
 const DROP = 'script, style, iframe, object, embed, form, link, meta, base, svg, button, textarea, select'
 const SAFE_URL = /^(https?:|mailto:|#)/i
@@ -39,13 +42,20 @@ export function Description({ html, url }: { html: string; url: string }) {
   return (
     <section className="file description">
       <header className="file-head">
-        <button className="link-button" onClick={() => setOpen(!open)} aria-expanded={open}>
-          {open ? '▾' : '▸'}
-        </button>
+        <Button
+          variant="ghost"
+          size="icon-xs"
+          className="text-muted-foreground"
+          onClick={() => setOpen(!open)}
+          aria-expanded={open}
+          aria-label={open ? 'Collapse the description' : 'Expand the description'}
+        >
+          <ChevronRight className={cn('transition-transform', open && 'rotate-90')} aria-hidden />
+        </Button>
         <span className="file-path">Description</span>
-        <button className="link-button" onClick={() => void window.api.openExternal(url)}>
+        <Button variant="link" size="xs" className="h-auto px-0" onClick={() => void window.api.openExternal(url)}>
           On GitHub
-        </button>
+        </Button>
       </header>
       {open && (
         <div

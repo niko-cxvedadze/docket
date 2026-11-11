@@ -1,30 +1,34 @@
-import { app } from 'electron'
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
+import { readStore, writeStore } from './persist'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { EFFORTS, VERBOSITIES, type Effort, type Settings, type Verbosity } from '../shared/types'
+import { EFFORTS, SUMMARY_LENGTHS, VERBOSITIES, type Effort, type Settings, type SummaryLength, type Verbosity } from '../shared/types'
 
 const MAX_GUIDE_CHARS = 8000
-const file = (): string => join(app.getPath('userData'), 'settings.json')
 let settings: Settings | null = null
 
 /** Fills in defaults and drops anything unexpected, for both the file on disk and what the window sends. */
 function normalise(raw: unknown): Settings {
   const voice = ((raw as Partial<Settings> | null)?.voice ?? {}) as Partial<Settings['voice']>
-  const review = ((raw as Partial<Settings> | null)?.review ?? {}) as Partial<Settings['review']>
+  const options = (o: unknown): Settings['review'] => {
+    const r = (o ?? {}) as Partial<Settings['review']>
+    return {
+      // The model name goes on a command line, so only what a model name can contain is kept.
+      model: typeof r.model === 'string' && /^[\w.[\]-]{1,80}$/.test(r.model) ? r.model : '',
+      effort: EFFORTS.includes(r.effort as Effort) ? (r.effort as Effort) : '',
+      verbosity: VERBOSITIES.includes(r.verbosity as Verbosity) ? (r.verbosity as Verbosity) : 'normal'
+    }
+  }
   return {
     voice: {
       enabled: voice.enabled !== false,
       guide: typeof voice.guide === 'string' ? voice.guide.slice(0, MAX_GUIDE_CHARS) : '',
       learnedAt: typeof voice.learnedAt === 'string' ? voice.learnedAt : undefined,
-      learnedFrom: typeof voice.learnedFrom === 'number' ? voice.learnedFrom : undefined
+      learnedFrom: typeof voice.learnedFrom === 'number' ? voice.learnedFrom : undefined,
+      summaryLength: SUMMARY_LENGTHS.includes(voice.summaryLength as SummaryLength) ? (voice.summaryLength as SummaryLength) : 'concise'
     },
-    review: {
-      // The model name goes on a command line, so only what a model name can contain is kept.
-      model: typeof review.model === 'string' && /^[\w.[\]-]{1,80}$/.test(review.model) ? review.model : '',
-      effort: EFFORTS.includes(review.effort as Effort) ? (review.effort as Effort) : '',
-      verbosity: VERBOSITIES.includes(review.verbosity as Verbosity) ? (review.verbosity as Verbosity) : 'normal'
-    }
+    review: options((raw as Partial<Settings> | null)?.review),
+    chat: options((raw as Partial<Settings> | null)?.chat)
   }
 }
 
@@ -47,19 +51,12 @@ export function reviewDefaults(): { model: string; effort: string } {
 
 export function getSettings(): Settings {
   if (settings) return settings
-  try {
-    settings = normalise(JSON.parse(readFileSync(file(), 'utf8')))
-  } catch {
-    settings = normalise(null)
-  }
+  settings = normalise(readStore<unknown>('settings.json', null))
   return settings
 }
 
 export function saveSettings(next: Settings): Settings {
   settings = normalise(next)
-  mkdirSync(app.getPath('userData'), { recursive: true })
-  const tmp = `${file()}.tmp`
-  writeFileSync(tmp, JSON.stringify(settings, null, 2))
-  renameSync(tmp, file())
+  writeStore('settings.json', settings, true)
   return settings
 }

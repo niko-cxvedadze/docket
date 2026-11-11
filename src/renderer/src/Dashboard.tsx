@@ -1,11 +1,15 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import type { Level, PrList, PrSummary, ReviewProgress } from '../../shared/types'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { toast } from 'sonner'
+import type { Level, MergedStackPr, PrList, PrSummary, ReviewProgress } from '../../shared/types'
 import { Badge } from '@/components/ui/badge'
 import { Card } from '@/components/ui/card'
 import { cn } from '@/lib/utils'
 import { ago } from './util'
-import { ExternalLink, GitBranch, Image as ImageIcon, Layers, Link2, Pin, Video } from 'lucide-react'
+import { ExternalLink, GitBranch, GitMerge, Image as ImageIcon, Layers, Link2, LoaderCircle, Pin, Video, type LucideIcon } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { Skeleton } from '@/components/ui/skeleton'
+import { preload, preloadTop } from './prCache'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { StatusIcons } from './StatusIcons'
 import { Author } from './Author'
 import { groupStacks, type Group } from './stacks'
@@ -30,6 +34,54 @@ const REASON: Record<Level, string> = {
   waiting: 'text-muted-foreground font-medium'
 }
 
+/** A part of a stack that has already merged: shown quietly, for how far the stack has come. Opens on GitHub. */
+function MergedRow({ pr, position }: { pr: MergedStackPr; position: number }) {
+  const open = (): void => void window.api.openExternal(pr.url)
+  return (
+    <li className="min-w-0">
+      <Card
+        onClick={open}
+        className="group relative cursor-pointer flex-row items-center gap-4 rounded-md bg-transparent py-2 pr-3.5 pl-5 opacity-75 shadow-none transition-colors hover:border-muted-foreground/60 hover:opacity-100"
+      >
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-tint text-[11px] font-semibold text-primary tabular-nums">
+              {position}
+            </span>
+          </TooltipTrigger>
+          <TooltipContent>Number {position} in the stack, merged into {pr.baseRef}</TooltipContent>
+        </Tooltip>
+        <div className="grid min-w-0 flex-1 gap-0.5">
+          <Button
+            variant="ghost"
+            className="h-auto min-w-0 shrink justify-start rounded-none p-0 text-left text-sm font-medium text-muted-foreground hover:bg-transparent hover:text-foreground"
+            onClick={(e) => {
+              e.stopPropagation()
+              open()
+            }}
+          >
+            <span className="min-w-0 truncate">{pr.title}</span>
+          </Button>
+          <div className="flex min-w-0 items-baseline gap-x-2.5 overflow-hidden text-xs text-muted-foreground">
+            <span className="inline-flex shrink-0 items-center gap-1 self-center font-semibold text-primary">
+              <GitMerge className="size-3" aria-hidden />
+              Merged
+            </span>
+            <span className="shrink-0 font-mono" title={pr.key}>
+              {pr.key.split('/')[1]}
+            </span>
+            <span className="shrink-0">{ago(pr.mergedAt)}</span>
+            <span className="shrink-0">
+              <span className="text-ready">+{pr.additions}</span> <span className="text-danger">−{pr.deletions}</span>
+            </span>
+          </div>
+        </div>
+        <ExternalLink className="size-4 shrink-0 text-muted-foreground opacity-0 group-hover:opacity-100" aria-hidden />
+      </Card>
+    </li>
+  )
+}
+
 /** Copy pull requests as titled links, or a pull request's branch name. `what` names them for the confirmation. */
 type Copy = (prs: PrSummary[], what: 'link' | 'stack' | 'selection' | 'branch') => void
 
@@ -46,6 +98,44 @@ function linksFor(prs: PrSummary[], numbered: boolean): { text: string; html: st
   if (prs.length === 1) return { text, html: anchor(prs[0]) }
   const tag = numbered ? 'ol' : 'ul'
   return { text, html: `<${tag}>${prs.map((p) => `<li>${anchor(p)}</li>`).join('')}</${tag}>` }
+}
+
+/** One of the small actions at the right of a row. Clicks stay on the button and do not open the row. */
+function RowAction({
+  Icon,
+  label,
+  tip,
+  active,
+  pressed,
+  onClick
+}: {
+  Icon: LucideIcon
+  label: string
+  tip: string
+  active?: boolean
+  pressed?: boolean
+  onClick: () => void
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          variant="ghost"
+          size="icon"
+          className={cn('size-6 shrink-0 hover:text-foreground', active ? 'text-primary' : 'text-muted-foreground')}
+          aria-label={label}
+          aria-pressed={pressed}
+          onClick={(e) => {
+            e.stopPropagation()
+            onClick()
+          }}
+        >
+          <Icon className={active ? 'fill-current' : ''} aria-hidden />
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>{tip}</TooltipContent>
+    </Tooltip>
+  )
 }
 
 function Row({
@@ -73,28 +163,29 @@ function Row({
   position?: number
 }) {
   const [first, ...rest] = pr.reasons
+  // Resting on a row for a moment starts loading its page, so the click opens it at once.
+  const hover = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const startPreload = (): void => {
+    hover.current ??= setTimeout(() => preload(pr), 150)
+  }
+  const stopPreload = (): void => {
+    if (hover.current) clearTimeout(hover.current)
+    hover.current = null
+  }
   return (
-    <li className="min-w-0">
-      {/* Title and why it is listed on the left; its standing as icons on the right. */}
+    <li className="min-w-0" onMouseEnter={startPreload} onMouseLeave={stopPreload} onFocus={() => preload(pr)}>
+      {/*
+        Title and why it is listed on the left; its standing as icons on the right. The whole card
+        takes clicks, but the title is the real button, so the keyboard and screen readers land on
+        one control and the small actions beside it are not nested inside another button.
+      */}
       <Card
-        role="button"
-        tabIndex={0}
         data-pr-key={pr.key}
-        aria-pressed={selected}
+        data-selected={selected || undefined}
         onClick={(e) => (e.metaKey || e.ctrlKey ? onToggle() : onOpen())}
-        onKeyDown={(e) => {
-          if (e.target !== e.currentTarget) return
-          if (e.key === 'x') onToggle()
-          else if (e.key === 'p') onPin()
-          else if (e.key === 'o') void window.api.openExternal(pr.url)
-          else if (e.key === 'b') onCopy([pr], 'branch')
-          else if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault()
-            onOpen()
-          }
-        }}
         className={cn(
-          'group @container cursor-pointer flex-row items-center gap-4 relative rounded-md py-2.5 pr-3.5 pl-5 shadow-none transition-colors hover:border-muted-foreground/60 focus-visible:outline-2 focus-visible:outline-ring',
+          'group @container relative cursor-pointer flex-row items-center gap-4 rounded-md py-2.5 pr-3.5 pl-5 shadow-none transition-colors hover:border-muted-foreground/60',
+          'has-[[data-slot=row-title]:focus-visible]:border-ring has-[[data-slot=row-title]:focus-visible]:ring-[3px] has-[[data-slot=row-title]:focus-visible]:ring-ring/50',
           pr.level === 'waiting' && 'bg-transparent',
           selected && 'border-primary bg-tint hover:border-primary'
         )}
@@ -108,24 +199,46 @@ function Row({
           )}
         />
         {position !== undefined && (
-          <span
-            className="flex size-5 shrink-0 items-center justify-center rounded-full bg-secondary text-[11px] font-semibold text-muted-foreground tabular-nums"
-            title={`Number ${position} in the stack, on top of ${pr.baseRef}`}
-          >
-            {position}
-          </span>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-secondary text-[11px] font-semibold text-muted-foreground tabular-nums">
+                {position}
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>
+              Number {position} in the stack, on top of {pr.baseRef}
+            </TooltipContent>
+          </Tooltip>
         )}
         <div className="grid min-w-0 flex-1 gap-0.5">
           <div className="flex min-w-0 items-center gap-1.5 text-sm font-medium">
-            <span className="truncate">{pr.title}</span>
+            <Button
+              variant="ghost"
+              data-slot="row-title"
+              aria-pressed={selected}
+              // buttonVariants says shrink-0; this one must shrink so a long title truncates before the badge does.
+              className="h-auto min-w-0 shrink justify-start rounded-none p-0 text-left text-sm font-medium hover:bg-transparent hover:text-foreground focus-visible:border-transparent focus-visible:ring-0"
+              onKeyDown={(e) => {
+                if (e.key === 'x') onToggle()
+                else if (e.key === 'p') onPin()
+                else if (e.key === 'o') void window.api.openExternal(pr.url)
+                else if (e.key === 'b') onCopy([pr], 'branch')
+              }}
+            >
+              <span className="min-w-0 truncate">{pr.title}</span>
+            </Button>
             {pr.preview && (
-              <span
-                className="inline-flex shrink-0 items-center gap-1 rounded-full bg-tint px-1.5 py-px text-[11px] font-semibold text-primary"
-                title={pr.preview === 'video' ? 'The description has a video of the change' : 'The description has screenshots'}
-              >
-                {pr.preview === 'video' ? <Video className="size-3" aria-hidden /> : <ImageIcon className="size-3" aria-hidden />}
-                {pr.preview === 'video' ? 'Video' : 'Images'}
-              </span>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-tint px-1.5 py-px text-[11px] font-semibold text-primary">
+                    {pr.preview === 'video' ? <Video className="size-3" aria-hidden /> : <ImageIcon className="size-3" aria-hidden />}
+                    {pr.preview === 'video' ? 'Video' : 'Images'}
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent>
+                  {pr.preview === 'video' ? 'The description has a video of the change' : 'The description has screenshots'}
+                </TooltipContent>
+              </Tooltip>
             )}
           </div>
           <div className="flex min-w-0 items-baseline gap-x-2.5 overflow-hidden text-xs text-muted-foreground">
@@ -151,62 +264,54 @@ function Row({
         </div>
         <StatusIcons pr={pr} progress={progress} />
         <div className="-ml-2 flex shrink-0 items-center gap-0.5">
-          <Button
-            variant="ghost"
-            size="icon"
-            className={cn('size-6 shrink-0 hover:text-foreground', pinned ? 'text-primary' : 'text-muted-foreground')}
-            title={pinned ? 'Unpin (press P)' : 'Pin to the top of this column (press P)'}
-            aria-label={`${pinned ? 'Unpin' : 'Pin'} ${pr.title}`}
-            aria-pressed={pinned}
-            onClick={(e) => {
-              e.stopPropagation()
-              onPin()
-            }}
-          >
-            <Pin className={pinned ? 'fill-current' : ''} aria-hidden />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-6 shrink-0 text-muted-foreground hover:text-foreground"
-            title="Copy link (Cmd-C). Cmd-click rows to select several."
-            aria-label={`Copy link to ${pr.title}`}
-            onClick={(e) => {
-              e.stopPropagation()
-              onCopy([pr], 'link')
-            }}
-          >
-            <Link2 aria-hidden />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-6 shrink-0 text-muted-foreground hover:text-foreground"
-            title={`Copy branch ${pr.headRef} (press B)`}
-            aria-label={`Copy branch name of ${pr.title}`}
-            onClick={(e) => {
-              e.stopPropagation()
-              onCopy([pr], 'branch')
-            }}
-          >
-            <GitBranch aria-hidden />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="size-6 shrink-0 text-muted-foreground hover:text-foreground"
-            title="Open on GitHub (press O)"
-            aria-label={`Open ${pr.title} on GitHub`}
-            onClick={(e) => {
-              e.stopPropagation()
-              void window.api.openExternal(pr.url)
-            }}
-          >
-            <ExternalLink aria-hidden />
-          </Button>
+          <RowAction
+            Icon={Pin}
+            active={pinned}
+            pressed={pinned}
+            label={`${pinned ? 'Unpin' : 'Pin'} ${pr.title}`}
+            tip={pinned ? 'Unpin (P)' : 'Pin to the top of this column (P)'}
+            onClick={onPin}
+          />
+          <RowAction
+            Icon={Link2}
+            label={`Copy link to ${pr.title}`}
+            tip="Copy link (⌘C). ⌘-click rows to select several."
+            onClick={() => onCopy([pr], 'link')}
+          />
+          <RowAction
+            Icon={GitBranch}
+            label={`Copy branch name of ${pr.title}`}
+            tip={`Copy branch ${pr.headRef} (B)`}
+            onClick={() => onCopy([pr], 'branch')}
+          />
+          <RowAction
+            Icon={ExternalLink}
+            label={`Open ${pr.title} on GitHub`}
+            tip="Open on GitHub (O)"
+            onClick={() => void window.api.openExternal(pr.url)}
+          />
         </div>
       </Card>
     </li>
+  )
+}
+
+/** Grey stand-ins shaped like rows, while more pull requests load. */
+function RowSkeletons({ count = 4 }: { count?: number }) {
+  return (
+    <ul className="mt-1.5 grid grid-cols-1 gap-1.5" aria-hidden>
+      {Array.from({ length: count }, (_, i) => (
+        <li key={i} className="flex items-center gap-4 rounded-md border px-5 py-3" style={{ opacity: 1 - i * 0.18 }}>
+          <div className="grid flex-1 gap-2">
+            <Skeleton className="h-3.5" style={{ width: `${70 - i * 9}%` }} />
+            <Skeleton className="h-3 w-2/5" />
+          </div>
+          <Skeleton className="h-4 w-20" />
+          <Skeleton className="h-4 w-16" />
+          <Skeleton className="h-4 w-20" />
+        </li>
+      ))}
+    </ul>
   )
 }
 
@@ -223,7 +328,8 @@ function Column({
   pins,
   onPin,
   onCopy,
-  hiddenNeeds = 0
+  hiddenNeeds = 0,
+  loading
 }: {
   pins: Set<string>
   onPin: (pr: PrSummary) => void
@@ -240,6 +346,8 @@ function Column({
   onCopy: Copy
   /** Pull requests that need you but are hidden by the filters. */
   hiddenNeeds?: number
+  /** More pull requests are on their way: say so, and hold their place with placeholder rows. */
+  loading?: string
 }) {
   const needs = prs.filter((p) => p.level !== 'waiting')
   // Stacked pull requests are kept together; a stack sits with whichever of its members is most urgent.
@@ -262,29 +370,38 @@ function Column({
   const rows = (items: Group[]) => (
     <ul className="grid grid-cols-1 gap-1.5">
       {items.map((g) =>
-        g.prs.length === 1 ? (
+        g.prs.length === 1 && g.merged.length === 0 ? (
           row(g.prs[0])
         ) : (
           <li key={g.key} className="min-w-0 rounded-lg border border-dashed p-1.5">
             <p className="flex items-center gap-1.5 px-1.5 pt-0.5 pb-1.5 text-xs text-muted-foreground">
               <Layers className="size-3.5" aria-hidden />
-              <span className="font-semibold text-foreground">Stack of {g.prs.length}</span>
+              <span className="font-semibold text-foreground">Stack of {g.merged.length + g.prs.length}</span>
+              {g.merged.length > 0 && (
+                <span className="shrink-0 font-medium text-primary">
+                  {g.merged.length} merged
+                </span>
+              )}
               <span className="truncate">
                 on <span className="font-mono">{g.base}</span>, merges from the bottom up
               </span>
-              <Button
-                variant="ghost"
-                size="sm"
-                className="ml-auto h-6 gap-1 px-2 text-xs"
-                title="Copy every pull request in this stack as titled links, in merge order (Cmd-Shift-C on a row)"
-                onClick={() => onCopy(g.prs, 'stack')}
-              >
-                <Link2 aria-hidden />
-                Copy stack links
-              </Button>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button variant="ghost" size="sm" className="ml-auto h-6 gap-1 px-2 text-xs" onClick={() => onCopy(g.prs, 'stack')}>
+                    <Link2 aria-hidden />
+                    Copy stack links
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Every open pull request in this stack as titled links, in merge order (⌘⇧C on a row)</TooltipContent>
+              </Tooltip>
             </p>
             {/* Shown the way GitHub shows a stack: the newest on top, the one that merges first at the bottom. */}
-            <ul className="grid grid-cols-1 gap-1.5">{g.prs.map((pr, i) => row(pr, i + 1)).reverse()}</ul>
+            <ul className="grid grid-cols-1 gap-1.5">
+              {[
+                ...g.merged.map((m, i) => <MergedRow key={m.key} pr={m} position={i + 1} />),
+                ...g.prs.map((pr, i) => row(pr, g.merged.length + i + 1))
+              ].reverse()}
+            </ul>
           </li>
         )
       )}
@@ -302,9 +419,15 @@ function Column({
             {hiddenNeeds} more hidden by filters
           </span>
         )}
+        {loading && (
+          <span className="inline-flex items-center gap-1.5 text-xs font-normal tracking-normal text-muted-foreground" role="status">
+            <LoaderCircle className="size-3.5 animate-spin motion-reduce:animate-none" aria-hidden />
+            {loading}
+          </span>
+        )}
         {controls && <span className="ml-auto text-sm font-normal tracking-normal">{controls}</span>}
       </h2>
-      {prs.length === 0 && <p className="py-4 text-muted-foreground">{emptyText}</p>}
+      {prs.length === 0 && !loading && <p className="rounded-md border border-dashed px-4 py-6 text-center text-sm text-muted-foreground">{emptyText}</p>}
       {pinned.length > 0 && (
         <div className="mb-5">
           <h3 className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-muted-foreground">
@@ -321,6 +444,7 @@ function Column({
           {rows(quiet)}
         </>
       )}
+      {loading && <RowSkeletons />}
     </section>
   )
 }
@@ -352,12 +476,15 @@ function useOpenPrs(list: PrList, enabled: boolean) {
   useEffect(() => {
     if (!enabled || !repos.length) return
     const key = repos.join(',')
-    if (openCache && openCache.repos === key && Date.now() - openCache.at < OPEN_STALE_MS) return
+    // The main process keeps the list from GitHub for a few minutes and marks drafts on every answer,
+    // so asking again is cheap. Asking after every dashboard refresh (which follows a finished review,
+    // a post or a discard) keeps "Review drafts" right for pull requests that are only in this list.
+    const fresh = openCache?.repos === key && Date.now() - openCache.at < OPEN_STALE_MS
     let cancelled = false
-    setState((s) => ({ ...s, loading: true, error: null }))
+    if (!fresh) setState((s) => ({ ...s, loading: true, error: null }))
     window.api.listOpenPrs(repos).then(
       (r) => {
-        openCache = { repos: key, at: Date.now(), ...r }
+        openCache = { repos: key, at: fresh ? openCache!.at : Date.now(), ...r }
         if (!cancelled) setState({ ...r, loading: false, error: null })
       },
       (e) => !cancelled && setState((s) => ({ ...s, loading: false, error: cleanError(e) }))
@@ -365,12 +492,18 @@ function useOpenPrs(list: PrList, enabled: boolean) {
     return () => {
       cancelled = true
     }
-    // list.fetchedAt: look again after each dashboard refresh, at most every few minutes.
-  }, [enabled, repos, list.fetchedAt])
+    // list: a new object after every dashboard refresh, even one answered from the cache.
+  }, [enabled, repos, list])
   return state
 }
 
 export function Dashboard({ list, progress, onOpen }: Props) {
+  // After each refresh, quietly load the pages of the few pull requests most likely to be opened next.
+  useEffect(() => {
+    const t = setTimeout(() => preloadTop(list.prs), 1500)
+    return () => clearTimeout(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [list.fetchedAt])
   const [scope, setScope] = useState<Scope>(() => {
     try {
       return localStorage.getItem(SCOPE_KEY) === 'all' ? 'all' : 'mine'
@@ -416,31 +549,32 @@ export function Dashboard({ list, progress, onOpen }: Props) {
   }, [])
 
   const [selection, setSelection] = useState<Set<string>>(() => new Set())
-  const [toast, setToast] = useState<string | null>(null)
-  useEffect(() => {
-    if (!toast) return
-    const t = setTimeout(() => setToast(null), 1800)
-    return () => clearTimeout(t)
-  }, [toast])
   const copy = useCallback<Copy>((items, what) => {
     if (!items.length) return
     if (what === 'branch') {
       const branch = items[0].headRef
-      void window.api.copyText(branch).then(() => setToast(`Copied branch ${branch}`))
+      void window.api.copyText(branch).then(
+        () => toast.success('Copied branch name', { description: branch }),
+        (e) => toast.error('Could not copy', { description: cleanError(e) })
+      )
       return
     }
     const { text, html } = linksFor(items, what === 'stack')
-    void window.api.copyText(text, html).then(() => {
-      setToast(
-        what === 'stack'
-          ? `Copied ${items.length} stack links`
-          : items.length === 1
-            ? 'Copied link'
-            : `Copied ${items.length} links`
-      )
-      // The selection was only made to copy it, so it is done once the links are on the clipboard.
-      if (what === 'selection') setSelection(new Set())
-    })
+    void window.api.copyText(text, html).then(
+      () => {
+        toast.success(
+          what === 'stack'
+            ? `Copied ${items.length} stack links`
+            : items.length === 1
+              ? 'Copied link'
+              : `Copied ${items.length} links`,
+          { description: items.length === 1 ? items[0].title : 'Paste into Slack or a document as titled links.' }
+        )
+        // The selection was only made to copy it, so it is done once the links are on the clipboard.
+        if (what === 'selection') setSelection(new Set())
+      },
+      (e) => toast.error('Could not copy', { description: cleanError(e) })
+    )
   }, [])
   const toggle = useCallback((pr: PrSummary) => {
     setSelection((prev) => {
@@ -500,7 +634,7 @@ export function Dashboard({ list, progress, onOpen }: Props) {
   return (
     <main className="flex-1 overflow-x-hidden overflow-y-auto px-7 pb-10">
       {/* Stays at the top while the lists scroll underneath; opaque so rows do not show through. */}
-      <div className="sticky top-0 z-10 -mx-7 border-b border-border/60 bg-background px-7 pt-3 pb-3 shadow-[0_6px_10px_-8px_rgb(0_0_0/0.45)]">
+      <div className="sticky top-0 z-10 -mx-7 border-b border-border/60 bg-background px-7 pt-3 pb-3 shadow-[0_6px_10px_-8px_rgb(0_0_0/0.15)] dark:shadow-[0_6px_10px_-8px_rgb(0_0_0/0.6)]">
         <FilterBar prs={source} filters={filters} progress={progress} shown={prs.length} onChange={setFilters} />
       </div>
       <div className="mt-4 grid grid-cols-1 gap-7 min-[1050px]:grid-cols-2">
@@ -525,11 +659,10 @@ export function Dashboard({ list, progress, onOpen }: Props) {
               filtering
                 ? 'No pull requests to review match the filters.'
                 : scope === 'all'
-                  ? open.loading
-                    ? ''
-                    : 'There are no other open pull requests in your repositories.'
+                  ? 'There are no other open pull requests in your repositories.'
                   : 'Nobody is waiting on a review from you.'
             }
+            loading={scope === 'all' && open.loading ? 'Loading all open…' : undefined}
             quietTitle={scope === 'all' ? 'Not waiting on you' : undefined}
             hiddenNeeds={hiddenNeeds('review')}
             controls={
@@ -544,13 +677,12 @@ export function Dashboard({ list, progress, onOpen }: Props) {
             onOpen={onOpen}
             selection={selection}
             onToggle={toggle}
-          pins={pins}
-          onPin={togglePin}
+            pins={pins}
+            onPin={togglePin}
             onCopy={copy}
           />
           {scope === 'all' && (
             <div className="mt-3 text-xs text-muted-foreground">
-              {open.loading && <p>Loading every open pull request in your repositories…</p>}
               {open.error && <p className="text-danger">Could not load all open pull requests. {open.error}</p>}
               {open.truncated && !open.loading && (
                 <p>Showing the {open.prs.length} most recently updated. Older open pull requests are on GitHub.</p>
@@ -560,24 +692,18 @@ export function Dashboard({ list, progress, onOpen }: Props) {
         </div>
       </div>
 
-      {(selectedPrs.length > 0 || toast) && (
+      {selectedPrs.length > 0 && (
         <div className="pointer-events-none fixed inset-x-0 bottom-5 z-20 flex justify-center">
           <div className="pointer-events-auto flex items-center gap-2 rounded-lg border bg-card px-3 py-2 text-sm shadow-lg" role="status">
-            {toast ? (
-              <span className="font-medium">{toast}</span>
-            ) : (
-              <>
-                <span className="font-medium tabular-nums">{selectedPrs.length} selected</span>
-                <Button size="sm" className="h-7 gap-1" onClick={() => copy(selectedPrs, 'selection')}>
-                  <Link2 aria-hidden />
-                  Copy links
-                  <kbd className="ml-1 text-[11px] opacity-70">⌘C</kbd>
-                </Button>
-                <Button size="sm" variant="ghost" className="h-7" onClick={() => setSelection(new Set())}>
-                  Clear
-                </Button>
-              </>
-            )}
+            <span className="font-medium tabular-nums">{selectedPrs.length} selected</span>
+            <Button size="sm" className="h-7 gap-1" onClick={() => copy(selectedPrs, 'selection')}>
+              <Link2 aria-hidden />
+              Copy links
+              <kbd className="ml-1 text-[11px] opacity-70">⌘C</kbd>
+            </Button>
+            <Button size="sm" variant="ghost" className="h-7" onClick={() => setSelection(new Set())}>
+              Clear
+            </Button>
           </div>
         </div>
       )}

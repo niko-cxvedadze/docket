@@ -1,10 +1,18 @@
 import { useEffect, useState } from 'react'
-import type { Settings as SettingsData } from '../../shared/types'
+import { SUMMARY_LENGTHS, type Settings as SettingsData, type SummaryLength } from '../../shared/types'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { ago, cleanError } from './util'
+
+const SUMMARY_LABEL: Record<SummaryLength, string> = { concise: 'Concise', standard: 'Standard', detailed: 'Detailed' }
+const SUMMARY_HINT: Record<SummaryLength, string> = {
+  concise: 'One or two short sentences: the verdict and anything no comment covers.',
+  standard: 'Up to four sentences.',
+  detailed: 'Up to six sentences, with room to explain concerns about the approach.'
+}
 
 const PLACEHOLDER = `Describe how you write review comments, for example:
 
@@ -90,6 +98,29 @@ export function Settings() {
       </div>
 
       <div className="grid gap-4">
+        <div className="grid gap-1.5">
+          <Label className="text-sm font-medium">Summary length</Label>
+          <div className="flex flex-wrap items-center gap-3">
+            <ToggleGroup
+              type="single"
+              variant="outline"
+              size="sm"
+              value={voice.summaryLength}
+              onValueChange={(v) => v && setVoice({ summaryLength: v as SummaryLength })}
+              aria-label="Summary length"
+            >
+              {SUMMARY_LENGTHS.map((l) => (
+                <ToggleGroupItem key={l} value={l} className="px-3 text-xs">
+                  {SUMMARY_LABEL[l]}
+                </ToggleGroupItem>
+              ))}
+            </ToggleGroup>
+            <span className="text-xs text-muted-foreground">
+              {SUMMARY_HINT[voice.summaryLength]} Applies to new reviews, with or without your voice.
+            </span>
+          </div>
+        </div>
+
         <div className="flex flex-wrap items-center gap-3">
           <Button variant="outline" size="sm" disabled={learning} onClick={() => void learn()}>
             {learning ? 'Reading your comments…' : 'Learn from my GitHub comments'}

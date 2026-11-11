@@ -4,6 +4,7 @@ import type {
   ExistingComment,
   PrDetail,
   PrFile,
+  PostedReview,
   PrSummary,
   ReviewDraft,
   ReviewProgress,
@@ -11,14 +12,34 @@ import type {
 } from '../../shared/types'
 import { commentableLines, parsePatch, type DiffRow } from '../../shared/diff'
 import { ago, cleanError } from './util'
-import { Check, ChevronRight, CircleCheck, CircleDot, Copy, MessageSquare, NotebookPen } from 'lucide-react'
+import { Bug, Check, ChevronRight, CircleCheck, CircleDot, ClipboardCheck, Copy, ExternalLink, FlaskConical, Gauge, MessageSquare, MessagesSquare, NotebookPen, Plus, ScanSearch, ShieldAlert, Trash2 } from 'lucide-react'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { PrChat } from './PrChat'
 import { Badge } from '@/components/ui/badge'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Author } from './Author'
 import { Description } from './Description'
-import { ReviewOptionsPicker } from './ReviewOptionsPicker'
+import { Composer, Shortcuts, type Shortcut } from './Composer'
+import { Markdown } from './Markdown'
+import { Confirm } from './Confirm'
+import { PostedReviewView, ReviewHistoryBar } from './ReviewHistory'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle
+} from '@/components/ui/alert-dialog'
+import { cachedHighlight, fetchDetail, isFresh, peekDetail } from './prCache'
+import { Label } from '@/components/ui/label'
+import { Textarea } from '@/components/ui/textarea'
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { CiDetails } from './CiStatus'
 import { MergeStatus } from './MergeStatus'
 import { FileTree } from './FileTree'
@@ -47,8 +68,6 @@ const hasContent = (d: ReviewDraft): boolean =>
 const summaryRows = (text: string): number =>
   Math.min(Math.max(8, text.split('\n').reduce((n, line) => n + Math.max(1, Math.ceil(line.length / 42)), 1)), 24)
 
-const rowsFor = (text: string): number => Math.min(Math.max(3, text.split('\n').length + 1), 16)
-
 function DraftCard({
   comment,
   readOnly,
@@ -63,7 +82,7 @@ function DraftCard({
   onRemove: (id: string) => void
 }) {
   return (
-    <div id={`c-${comment.id}`} className={`draft-card ${comment.included ? '' : 'dropped'}`}>
+    <div id={`c-${comment.id}`} className={cn('draft-card', !comment.included && 'dropped')}>
       <div className="draft-head">
         <span className={`severity ${comment.severity}`}>{comment.severity}</span>
         <span className="draft-title">{comment.title || (comment.source === 'me' ? 'Your comment' : 'Finding')}</span>
@@ -74,26 +93,32 @@ function DraftCard({
         )}
         <span className="muted">{comment.source === 'ai' ? 'drafted by Claude' : 'written by you'}</span>
       </div>
-      <textarea
+      {/* Grows with what is typed; a posted comment reads as text rather than as a box to type in. */}
+      <Textarea
         value={comment.body}
-        rows={rowsFor(comment.body)}
+        rows={3}
         readOnly={readOnly}
         placeholder="Write a comment"
         aria-label={`Comment on ${comment.path} line ${comment.line}`}
+        className={cn(
+          'min-h-16 field-sizing-content bg-background text-[13px] leading-relaxed md:text-[13px]',
+          readOnly && 'cursor-default resize-none border-transparent bg-transparent px-0 shadow-none focus-visible:ring-0 dark:bg-transparent'
+        )}
         onChange={(e) => onChange({ ...comment, body: e.target.value })}
         onBlur={() => {
           if (comment.source === 'me' && !comment.body.trim()) onRemove(comment.id)
         }}
       />
       {!readOnly && (
-        <div className="draft-actions">
-          <label className="check">
+        <div className="mt-1.5 flex items-center justify-between gap-2">
+          <Label className="gap-2 text-[13px] font-normal">
             <Checkbox checked={comment.included} onCheckedChange={(v) => onChange({ ...comment, included: v === true })} />
             Post this comment
-          </label>
-          <button className="link-button danger" onClick={() => onRemove(comment.id)}>
+          </Label>
+          <Button variant="ghost" size="xs" className="text-danger hover:text-danger" onClick={() => onRemove(comment.id)}>
+            <Trash2 aria-hidden />
             Delete
-          </button>
+          </Button>
         </div>
       )}
     </div>
@@ -132,7 +157,7 @@ function ExistingCard({ comment, where, reply }: { comment: ExistingComment; whe
           On GitHub
         </Button>
       </div>
-      <div className="existing-body">{comment.body}</div>
+      <Markdown text={comment.body} className="text-[13px]" />
     </div>
   )
 }
@@ -221,8 +246,12 @@ const FileDiff = memo(function FileDiff({
   const [open, setOpen] = useState(!viewed && rows.length <= 800)
   const html = useMemo(() => {
     const lang = languageFor(file.path)
-    return rows.map((r) => (r.type === 'hunk' ? '' : highlightLine(r.text, lang)))
-  }, [rows, file.path])
+    return cachedHighlight(`${file.path}:${fileSignature(file)}`, () =>
+      rows.map((r) => (r.type === 'hunk' ? '' : highlightLine(r.text, lang)))
+    )
+    // The signature changes whenever the patch does, so it stands in for rows.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [file])
   // Where each GitHub thread belongs: on a new-side line, an old-side (deleted) line, or nowhere in this diff any more.
   // A thread sits where its first comment was made.
   const placed = useMemo(() => {
@@ -243,41 +272,68 @@ const FileDiff = memo(function FileDiff({
   return (
     <section className={viewed ? 'file viewed' : 'file'} id={`f-${index}`}>
       <header className="file-head">
-        <button className="link-button" onClick={() => setOpen(!open)} aria-expanded={open}>
-          {open ? '▾' : '▸'}
-        </button>
+        <Button
+          variant="ghost"
+          size="icon-xs"
+          className="text-muted-foreground"
+          onClick={() => setOpen(!open)}
+          aria-expanded={open}
+          aria-label={open ? `Collapse ${file.path}` : `Expand ${file.path}`}
+        >
+          <ChevronRight className={cn('transition-transform', open && 'rotate-90')} aria-hidden />
+        </Button>
         <span className="mono file-path">
           {file.previousPath ? `${file.previousPath} → ` : ''}
           {file.path}
         </span>
         {/* Shown in the header so a folded file still says there is a conversation inside. */}
         {placed.counts.open > 0 && (
-          <span
-            className="comment-count border-action/50 text-action"
-            title={`${placed.counts.open} unresolved ${placed.counts.open === 1 ? 'conversation' : 'conversations'} on GitHub`}
-          >
-            <MessageSquare aria-hidden /> {placed.counts.open}
-          </span>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Badge variant="outline" className="gap-1 border-action/50 font-semibold text-action">
+                <MessageSquare aria-hidden /> {placed.counts.open}
+              </Badge>
+            </TooltipTrigger>
+            <TooltipContent>
+              {placed.counts.open} unresolved {placed.counts.open === 1 ? 'conversation' : 'conversations'} on GitHub
+            </TooltipContent>
+          </Tooltip>
         )}
         {placed.counts.resolved > 0 && (
-          <span
-            className="comment-count text-ready"
-            title={`${placed.counts.resolved} resolved ${placed.counts.resolved === 1 ? 'conversation' : 'conversations'}`}
-          >
-            <CircleCheck aria-hidden /> {placed.counts.resolved}
-          </span>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Badge variant="outline" className="gap-1 font-semibold text-ready">
+                <CircleCheck aria-hidden /> {placed.counts.resolved}
+              </Badge>
+            </TooltipTrigger>
+            <TooltipContent>
+              {placed.counts.resolved} resolved {placed.counts.resolved === 1 ? 'conversation' : 'conversations'}
+            </TooltipContent>
+          </Tooltip>
         )}
         {drafts.length > 0 && (
-          <span className="comment-count draft" title={`${drafts.length} drafted ${drafts.length === 1 ? 'comment' : 'comments'}, not posted yet`}>
-            <NotebookPen aria-hidden /> {drafts.length}
-          </span>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Badge variant="outline" className="gap-1 border-primary font-semibold text-primary">
+                <NotebookPen aria-hidden /> {drafts.length}
+              </Badge>
+            </TooltipTrigger>
+            <TooltipContent>
+              {drafts.length} drafted {drafts.length === 1 ? 'comment' : 'comments'}, not posted yet
+            </TooltipContent>
+          </Tooltip>
         )}
         <span className="muted">{file.status}</span>
         <span>
           <span className="add">+{file.additions}</span> <span className="del">−{file.deletions}</span>
         </span>
         {/* As on GitHub: ticking Viewed folds the file away, and it stays ticked until the file changes. */}
-        <label className={viewed ? 'viewed-toggle on' : 'viewed-toggle'}>
+        <Label
+          className={cn(
+            'h-6 cursor-pointer gap-1.5 rounded-md border px-2 text-xs font-normal whitespace-nowrap transition-colors hover:border-muted-foreground',
+            viewed && 'border-ready/60 bg-ready-bg font-semibold text-ready hover:border-ready'
+          )}
+        >
           <Checkbox
             checked={viewed}
             onCheckedChange={(v) => {
@@ -286,7 +342,7 @@ const FileDiff = memo(function FileDiff({
             }}
           />
           Viewed
-        </label>
+        </Label>
       </header>
       {open && placed.loose.length > 0 && (
         <div className="loose-comments">
@@ -334,13 +390,15 @@ const FileDiff = memo(function FileDiff({
                           <td className="num">{row.newLine ?? ''}</td>
                           <td className="plus">
                             {line !== undefined && !readOnly && (
-                              <button
+                              <Button
+                                size="icon-xs"
+                                className="size-[18px] rounded opacity-0 focus-visible:opacity-100 [tr.row:hover_&]:opacity-100"
                                 title={`Comment on line ${line}`}
                                 aria-label={`Comment on line ${line}`}
                                 onClick={() => onAdd(file.path, line)}
                               >
-                                +
-                              </button>
+                                <Plus className="size-3" strokeWidth={3} aria-hidden />
+                              </Button>
                             )}
                           </td>
                           <td className="code">
@@ -394,10 +452,22 @@ const loadViewed = (prKey: string): Record<string, string> => {
 }
 
 export function PrView({ pr, progress, onDraftChanged }: Props) {
-  const [detail, setDetail] = useState<PrDetail | null>(null)
+  // A page opened before shows at once from the cache; load() then refreshes it if needed.
+  const [detail, setDetail] = useState<PrDetail | null>(() => peekDetail(pr.key))
   const [draft, setDraft] = useState<ReviewDraft | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [branchCopied, setBranchCopied] = useState(false)
+  const [sideTab, setSideTab] = useState<'review' | 'chat'>('review')
+  // Reviews already posted on this pull request; one of them can be opened read-only.
+  const [postedReviews, setPostedReviews] = useState<PostedReview[]>([])
+  const [viewingReview, setViewingReview] = useState<PostedReview | null>(null)
+  const loadReviews = useCallback(
+    () => window.api.listReviews(pr.key).then(setPostedReviews, () => undefined),
+    [pr.key]
+  )
+  useEffect(() => {
+    void loadReviews()
+  }, [loadReviews])
   const [focus, setFocus] = useState('')
   // Path to the signature of the diff that was on screen when the file was marked viewed.
   const [viewedMarks, setViewedMarks] = useState(() => loadViewed(pr.key))
@@ -427,33 +497,67 @@ export function PrView({ pr, progress, onDraftChanged }: Props) {
   /** Whether a draft for this pull request currently exists on disk. */
   const stored = useRef(false)
 
-  const load = useCallback(async () => {
-    try {
-      const [d, dr] = await Promise.all([window.api.prDetail(pr.repo, pr.number), window.api.getDraft(pr.key)])
-      const real = dr && hasContent(dr) ? dr : null
-      if (dr && !real) void window.api.discardDraft(pr.key)
-      setDetail(d)
-      setDraft(real)
-      latest.current = real
-      stored.current = !!real
-      setLoadError(null)
-    } catch (e) {
-      setLoadError(cleanError(e))
-    }
-  }, [pr.repo, pr.number, pr.key])
+  /** The draft, and the page unless the cached one is still fresh. `force` always asks GitHub (after posting). */
+  const load = useCallback(
+    async (force = false) => {
+      const draftLoad = window.api.getDraft(pr.key).then((dr) => {
+        const real = dr && hasContent(dr) ? dr : null
+        if (dr && !real) void window.api.discardDraft(pr.key, 'empty draft on load')
+        setDraft(real)
+        latest.current = real
+        stored.current = !!real
+      })
+      try {
+        if (force || !isFresh(pr)) setDetail(await fetchDetail(pr))
+        else setDetail(peekDetail(pr.key))
+        await draftLoad
+        setLoadError(null)
+      } catch (e) {
+        await draftLoad.catch(() => undefined)
+        // With a cached page on screen, a failed refresh only needs a note, not an empty page.
+        setLoadError(peekDetail(pr.key) ? `Showing the copy loaded earlier. ${cleanError(e)}` : cleanError(e))
+      }
+    },
+    // pr changes identity on every dashboard refresh; what matters is which pull request and its head.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [pr.key, pr.headSha]
+  )
 
-  useEffect(() => void load(), [load])
   useEffect(() => {
-    if (progress?.state === 'done') void load()
+    void load()
+  }, [load])
+  useEffect(() => {
+    if (progress?.state !== 'done') return
+    // An edit typed just before Claude finished may not be saved yet. When Claude added to this same
+    // draft, keep that edit and take only the comments Claude added; a replaced draft wins outright.
+    const mine = latest.current
+    if (saveTimer.current && mine) {
+      clearTimeout(saveTimer.current)
+      saveTimer.current = null
+      void window.api.getDraft(pr.key).then(async (disk) => {
+        if (disk && disk.createdAt === mine.createdAt) {
+          const ids = new Set(mine.comments.map((c) => c.id))
+          await window.api.saveDraft({ ...mine, comments: [...mine.comments, ...disk.comments.filter((c) => !ids.has(c.id))] })
+        }
+        void load()
+      })
+      return
+    }
+    void load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [progress?.state, load])
 
-  // Flush a pending save when leaving the view.
+  // Flush a pending save when leaving the view, and let the dashboard know if a draft appeared or went away.
+  const draftChanged = useRef(onDraftChanged)
+  draftChanged.current = onDraftChanged
   useEffect(
     () => () => {
       if (saveTimer.current) {
         clearTimeout(saveTimer.current)
-        if (latest.current && hasContent(latest.current)) void window.api.saveDraft(latest.current)
-        else if (stored.current) void window.api.discardDraft(pr.key)
+        const real = !!latest.current && hasContent(latest.current)
+        const changed = real !== stored.current
+        if (real) void window.api.saveDraft(latest.current!).then(() => changed && draftChanged.current())
+        else if (stored.current) void window.api.discardDraft(pr.key, 'emptied, saved on leaving').then(() => draftChanged.current())
       }
     },
     []
@@ -480,7 +584,7 @@ export function PrView({ pr, progress, onDraftChanged }: Props) {
           const real = hasContent(next)
           const changed = real !== stored.current
           stored.current = real
-          void (real ? window.api.saveDraft(next) : changed ? window.api.discardDraft(pr.key) : Promise.resolve()).then(
+          void (real ? window.api.saveDraft(next) : changed ? window.api.discardDraft(pr.key, 'emptied while editing') : Promise.resolve()).then(
             () => changed && onDraftChanged()
           )
         }, 400)
@@ -592,7 +696,7 @@ export function PrView({ pr, progress, onDraftChanged }: Props) {
         comments: inline.map((c) => ({ path: c.path, line: c.line, body: c.body.trim() }))
       })
       setConfirming(false)
-      await load()
+      await Promise.all([load(true), loadReviews()])
       onDraftChanged()
     } catch (e) {
       setPostError(cleanError(e))
@@ -601,12 +705,12 @@ export function PrView({ pr, progress, onDraftChanged }: Props) {
     }
   }
 
-  const discard = async (): Promise<void> => {
+  const discard = async (why: string): Promise<void> => {
     if (saveTimer.current) {
       clearTimeout(saveTimer.current)
       saveTimer.current = null
     }
-    await window.api.discardDraft(pr.key)
+    await window.api.discardDraft(pr.key, why)
     setDraft(null)
     latest.current = null
     stored.current = false
@@ -614,7 +718,16 @@ export function PrView({ pr, progress, onDraftChanged }: Props) {
     onDraftChanged()
   }
 
-  const startReview = (): void => void window.api.startReview(pr, focus)
+  const startReview = (withFocus: string = focus, mode: 'replace' | 'extend' = 'replace'): void => {
+    // Claude reads the draft from disk when it starts adding to it, so save what is typed first.
+    if (mode === 'extend' && saveTimer.current && latest.current) {
+      clearTimeout(saveTimer.current)
+      saveTimer.current = null
+      void window.api.saveDraft(latest.current).then(() => window.api.startReview(pr, withFocus, mode))
+      return
+    }
+    void window.api.startReview(pr, withFocus, mode)
+  }
   const copyBranch = (): void =>
     void window.api.copyText(pr.headRef).then(() => {
       setBranchCopied(true)
@@ -672,9 +785,10 @@ export function PrView({ pr, progress, onDraftChanged }: Props) {
             </p>
           )}
         </div>
-        <button className="button quiet" onClick={() => void window.api.openExternal(pr.url)}>
+        <Button variant="outline" size="sm" className="shrink-0" onClick={() => void window.api.openExternal(pr.url)}>
+          <ExternalLink aria-hidden />
           Open on GitHub
-        </button>
+        </Button>
       </header>
 
       {loadError && (
@@ -724,110 +838,124 @@ export function PrView({ pr, progress, onDraftChanged }: Props) {
         <ResizableHandle />
 
         <ResizablePanel id="review" defaultSize={400} minSize={280} maxSize="65%">
-        <aside className="review-pane" aria-label="Review">
-          <h2>{pr.role === 'mine' ? 'Self-review' : 'Your review'}</h2>
-
+        <Tabs value={sideTab} onValueChange={(v) => setSideTab(v === 'chat' ? 'chat' : 'review')} className="h-full gap-0 bg-card">
+        <TabsList className="mx-3 mt-3 self-start">
+          <TabsTrigger value="review">
+            <ClipboardCheck aria-hidden />
+            Review
+          </TabsTrigger>
+          <TabsTrigger value="chat">
+            <MessagesSquare aria-hidden />
+            Ask Claude
+          </TabsTrigger>
+        </TabsList>
+        {/* Kept mounted, so switching tabs never drops a half-written comment or a streaming answer. */}
+        <TabsContent value="chat" forceMount className="min-h-0 data-[state=inactive]:hidden">
+          <PrChat pr={pr} />
+        </TabsContent>
+        <TabsContent value="review" forceMount className="min-h-0 data-[state=inactive]:hidden">
+        <aside className="flex h-full min-h-0 flex-col bg-card" aria-label="Review">
+          <ReviewHistoryBar reviews={postedReviews} viewing={viewingReview} onView={setViewingReview} />
+          <div className="grid min-h-0 flex-1 content-start gap-3 overflow-auto px-4 py-3 text-[13px]">
+          {viewingReview ? (
+            <PostedReviewView
+              review={viewingReview}
+              onJump={(path) => {
+                const i = parsed.findIndex(({ file }) => file.path === path)
+                if (i >= 0) jump(`f-${i}`)
+              }}
+            />
+          ) : (
+          <>
           {running && (
-            <div className="progress">
+            <p className="flex items-center gap-2 text-xs text-muted-foreground">
               <span className="spinner" aria-hidden />
-              <span>{progress!.step}</span>
-              <button className="link-button" onClick={() => void window.api.cancelReview(pr.key)}>
-                Cancel
-              </button>
-            </div>
+              {progress!.step}
+            </p>
+          )}
+          {progress?.state === 'done' && progress.step !== 'Review drafted' && (
+            <p className="text-xs text-muted-foreground" role="status">
+              {progress.step}.
+            </p>
           )}
           {progress?.state === 'error' && (
-            <div className="banner error" role="alert">
+            <div className="banner error m-0" role="alert">
               The review did not finish. {progress.error}
             </div>
           )}
 
           {!real && !running && (
-            <div className="start">
-              <label className="field">
-                Focus (optional)
-                <textarea
-                  value={focus}
-                  rows={3}
-                  onChange={(e) => setFocus(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) startReview()
-                  }}
-                  placeholder="e.g. the retry logic, error handling"
-                />
-              </label>
-              <ReviewOptionsPicker />
-              <button
-                className="button primary"
-                onClick={startReview}
-                title="Claude reads the changes in a separate checkout kept by Docket and drafts comments. Nothing is posted until you choose to."
-              >
-                Review with Claude
-              </button>
-              <p className="muted small">Or press + on a line to comment yourself.</p>
-            </div>
+            <p className="text-muted-foreground">
+              {pr.role === 'mine' ? 'Have Claude look over your own change before others do. ' : ''}Claude reads the changes
+              in its own up-to-date checkout and drafts comments for you to edit. Nothing is posted until you choose to.
+              Or press + on a line to comment yourself.
+            </p>
           )}
 
           {real && draft && (
             <>
               {posted && (
-                <div className="banner ok">
+                <div className="banner ok m-0">
                   Review posted {ago(posted.at)}.{' '}
-                  <button className="link-button" onClick={() => void window.api.openExternal(posted.url)}>
+                  <Button variant="link" size="xs" className="h-auto px-0" onClick={() => void window.api.openExternal(posted.url)}>
                     View on GitHub
-                  </button>
+                  </Button>
                 </div>
               )}
               {stale && (
-                <div className="banner">
+                <div className="banner m-0">
                   New commits were pushed after this review was drafted. Comments may point at lines that moved.
                 </div>
               )}
               {(draft.model || draft.effort) && draft.comments.some((c) => c.source === 'ai') && (
-                <p className="muted small">
+                <p className="text-xs text-muted-foreground">
                   Drafted with {[draft.model, draft.effort && `${draft.effort} effort`].filter(Boolean).join(', ')}.
                 </p>
               )}
               {!draft.fullContext && draft.comments.some((c) => c.source === 'ai') && (
-                <p className="muted small">Claude saw only the diff for this review, not the rest of the repository.</p>
+                <p className="text-xs text-muted-foreground">Claude saw only the diff for this review, not the rest of the repository.</p>
               )}
 
-              <label className="field">
-                Summary
-                <textarea
+              <div className="grid gap-1.5">
+                <Label htmlFor="review-summary">Summary</Label>
+                <Textarea
+                  id="review-summary"
                   value={draft.summary}
                   rows={summaryRows(draft.summary)}
                   readOnly={readOnly}
                   placeholder="Overall comment for the author"
+                  className="text-[13px]"
                   onChange={(e) => update((d) => ({ ...d, summary: e.target.value }))}
                 />
-              </label>
+              </div>
 
-              <div className="field">
-                Post as
-                <div className="segmented" role="radiogroup" aria-label="Review type">
+              <div className="grid gap-1.5">
+                <Label>Post as</Label>
+                <ToggleGroup
+                  type="single"
+                  variant="outline"
+                  size="sm"
+                  value={draft.verdict}
+                  disabled={readOnly}
+                  aria-label="Review type"
+                  onValueChange={(v) => v && update((d) => ({ ...d, verdict: v as Verdict }))}
+                  className="w-full"
+                >
                   {(Object.keys(VERDICT_LABEL) as Verdict[]).map((v) => (
-                    <button
-                      key={v}
-                      role="radio"
-                      aria-checked={draft.verdict === v}
-                      className={draft.verdict === v ? 'on' : ''}
-                      disabled={readOnly || (pr.role === 'mine' && v !== 'comment')}
-                      onClick={() => update((d) => ({ ...d, verdict: v }))}
-                    >
+                    <ToggleGroupItem key={v} value={v} className="flex-1 text-xs" disabled={pr.role === 'mine' && v !== 'comment'}>
                       {VERDICT_LABEL[v]}
-                    </button>
+                    </ToggleGroupItem>
                   ))}
-                </div>
+                </ToggleGroup>
                 {pr.role === 'mine' && (
-                  <span className="muted small">GitHub only allows comments on your own pull request.</span>
+                  <span className="text-xs text-muted-foreground">GitHub only allows comments on your own pull request.</span>
                 )}
               </div>
 
-              <h3>
+              <h3 className="mt-1 flex items-baseline gap-2 font-semibold">
                 Comments <span className="count">{toPost.length} to post of {written.length}</span>
               </h3>
-              {written.length === 0 && <p className="muted small">No comments. Press + next to a line to add one.</p>}
+              {written.length === 0 && <p className="text-xs text-muted-foreground">No comments. Press + next to a line to add one.</p>}
               <ul className="finding-list">
                 {written.filter(inDiff).map((c) => (
                   <li key={c.id}>
@@ -851,8 +979,8 @@ export function PrView({ pr, progress, onDraftChanged }: Props) {
 
               {outside.length > 0 && (
                 <>
-                  <h3>Not on a changed line</h3>
-                  <p className="muted small">
+                  <h3 className="mt-1 font-semibold">Not on a changed line</h3>
+                  <p className="text-xs text-muted-foreground">
                     GitHub cannot attach these to the diff, so they will be added to the summary.
                   </p>
                   {outside.map((c) => (
@@ -869,78 +997,113 @@ export function PrView({ pr, progress, onDraftChanged }: Props) {
               )}
 
               {postError && (
-                <div className="banner error" role="alert">
+                <div className="banner error m-0" role="alert">
                   GitHub did not accept the review. {postError}
                 </div>
               )}
 
-              <div className="review-actions">
-                {posted ? (
-                  <button className="button" onClick={() => void discard()}>
-                    Start a new review
-                  </button>
-                ) : confirming ? (
-                  <div className="confirm">
-                    <p>
-                      Post to {pr.repo}#{pr.number} as <strong>{VERDICT_LABEL[draft.verdict]}</strong> with{' '}
-                      {toPost.length} {toPost.length === 1 ? 'comment' : 'comments'}? {pr.author.login} and other
-                      watchers will be notified.
-                    </p>
-                    <button className="button primary" disabled={posting} onClick={() => void post()}>
+              {posted ? (
+                <Button variant="outline" size="sm" className="justify-self-start" onClick={() => void discard('start a new review')}>
+                  Start a new review
+                </Button>
+              ) : confirming ? (
+                <div className="grid gap-2 rounded-lg border bg-background p-3">
+                  <p>
+                    Post to {pr.repo}#{pr.number} as <strong>{VERDICT_LABEL[draft.verdict]}</strong> with{' '}
+                    {toPost.length} {toPost.length === 1 ? 'comment' : 'comments'}? {pr.author.login} and other watchers
+                    will be notified.
+                  </p>
+                  <div className="flex gap-2">
+                    <Button size="sm" disabled={posting} onClick={() => void post()}>
                       {posting ? 'Posting…' : 'Post review'}
-                    </button>
-                    <button className="button quiet" disabled={posting} onClick={() => setConfirming(false)}>
+                    </Button>
+                    <Button size="sm" variant="ghost" disabled={posting} onClick={() => setConfirming(false)}>
                       Keep editing
-                    </button>
+                    </Button>
                   </div>
-                ) : rerunning ? (
-                  <form
-                    className="confirm"
-                    onSubmit={(e) => {
-                      e.preventDefault()
-                      setRerunning(false)
-                      startReview()
-                    }}
+                </div>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <Button size="sm" disabled={!canPost} onClick={() => setConfirming(true)}>
+                    Post review
+                  </Button>
+                  <Confirm
+                    title="Discard this draft?"
+                    description="The summary and every comment in it, including your edits, are deleted. This cannot be undone from Docket."
+                    action="Discard draft"
+                    onConfirm={() => void discard('discard draft button')}
                   >
-                    <label className="field">
-                      Anything to focus on this time? (optional)
-                      <textarea
-                        autoFocus
-                        value={focus}
-                        rows={3}
-                        onChange={(e) => setFocus(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) e.currentTarget.form?.requestSubmit()
-                        }}
-                        placeholder="e.g. the retry logic, error handling"
-                      />
-                    </label>
-                    <ReviewOptionsPicker />
-                    <p className="muted small">This replaces the current draft, including your edits.</p>
-                    <button type="submit" className="button primary" disabled={running}>
-                      Run Claude again
-                    </button>
-                    <button type="button" className="button quiet" onClick={() => setRerunning(false)}>
-                      Keep this draft
-                    </button>
-                  </form>
-                ) : (
-                  <>
-                    <button className="button primary" disabled={!canPost} onClick={() => setConfirming(true)}>
-                      Post review…
-                    </button>
-                    <button className="button quiet" disabled={running} onClick={() => setRerunning(true)}>
-                      Run Claude again…
-                    </button>
-                    <button className="link-button danger" onClick={() => void discard()}>
+                    <Button size="sm" variant="ghost" className="ml-auto text-danger hover:text-danger">
                       Discard draft
-                    </button>
-                  </>
-                )}
-              </div>
+                    </Button>
+                  </Confirm>
+                </div>
+              )}
             </>
           )}
+          </>
+          )}
+          </div>
+
+          {!posted && !viewingReview && (
+            <Composer
+              kind="review"
+              value={focus}
+              onChange={setFocus}
+              running={running}
+              allowEmpty
+              onStop={() => void window.api.cancelReview(pr.key)}
+              onSubmit={() => (real ? setRerunning(true) : startReview())}
+              submitLabel={real ? 'Run again' : 'Review'}
+              placeholder={real ? 'Anything to focus on this time? (optional)' : 'Anything to focus on? (optional)'}
+              above={
+                <Shortcuts
+                  items={REVIEW_FOCUS}
+                  disabled={running}
+                  onPick={(s) => {
+                    setFocus(s.prompt)
+                    // General starts at once; with a draft open it still asks before replacing it.
+                    if (!s.prompt) {
+                      if (real) setRerunning(true)
+                      else startReview('')
+                    }
+                  }}
+                />
+              }
+            />
+          )}
+          <AlertDialog open={rerunning && !running} onOpenChange={(open) => !open && setRerunning(false)}>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>{stale ? 'Replace the draft?' : 'Run Claude again on this draft?'}</AlertDialogTitle>
+                <AlertDialogDescription>
+                  {stale
+                    ? 'The draft is behind new commits, so its comments point at old lines. Running again replaces it, including your edits.'
+                    : 'Add to draft keeps your summary, verdict and comments, and adds only what Claude finds that is not already there. Replace draft starts over and loses your edits.'}
+                  {focus.trim() && (
+                    <>
+                      {' '}
+                      Focus: <span className="text-foreground">{focus.trim()}</span>
+                    </>
+                  )}
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogAction
+                  variant={stale ? 'destructive' : 'outline'}
+                  className={stale ? '' : 'text-danger hover:text-danger'}
+                  onClick={() => startReview()}
+                >
+                  Replace draft
+                </AlertDialogAction>
+                {!stale && <AlertDialogAction onClick={() => startReview(focus, 'extend')}>Add to draft</AlertDialogAction>}
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
         </aside>
+        </TabsContent>
+        </Tabs>
         </ResizablePanel>
       </ResizablePanelGroup>
     </div>
@@ -950,3 +1113,13 @@ export function PrView({ pr, progress, onDraftChanged }: Props) {
 const EMPTY_FILES: PrFile[] = []
 const EMPTY_DRAFTS: DraftComment[] = []
 const EMPTY_EXISTING: ExistingComment[] = []
+
+/** Ready-made focus for a review: one click puts it in the box, ready to send or edit. */
+const REVIEW_FOCUS: Shortcut[] = [
+  // No focus: Claude weighs everything and reports what matters most in this pull request.
+  { label: 'General', Icon: ScanSearch, title: 'A general review with no particular focus, started right away', prompt: '' },
+  { label: 'Bugs', Icon: Bug, title: 'Bugs and edge cases', prompt: 'Bugs and edge cases in the changed logic' },
+  { label: 'Security', Icon: ShieldAlert, title: 'Input handling, auth and secrets', prompt: 'Security: input handling, auth and secrets' },
+  { label: 'Tests', Icon: FlaskConical, title: 'Missing or weak tests', prompt: 'Missing or weak tests for the changed behaviour' },
+  { label: 'Performance', Icon: Gauge, title: 'Slow paths and wasted work', prompt: 'Performance and unnecessary work' }
+]

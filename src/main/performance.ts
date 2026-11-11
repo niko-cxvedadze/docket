@@ -2,6 +2,7 @@ import { app } from 'electron'
 import { readFileSync, writeFileSync, mkdirSync, renameSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { graphql, searchCommits } from './github'
+import { readStore, writeStore } from './persist'
 import type { MergedPr, Performance, PrSummary, ReviewGiven, Snapshot } from '../shared/types'
 
 const WEEKS = 52
@@ -43,9 +44,9 @@ export function recordSnapshot(prs: PrSummary[]): void {
     reviewQueue: queue.length,
     queueLines: queue.reduce((n, p) => n + p.additions + p.deletions, 0)
   }
-  const all = readJson<Snapshot[]>('snapshots.json', []).filter((s) => s.date !== today.date)
+  const all = readStore<Snapshot[]>('snapshots.json', []).filter((s) => s.date !== today.date)
   all.push(today)
-  writeJson('snapshots.json', all.slice(-730))
+  writeStore('snapshots.json', all.slice(-730))
 }
 
 // ---------- History from GitHub ----------
@@ -284,7 +285,7 @@ function startBackfill(): void {
 let refreshing: Promise<Performance> | null = null
 
 export async function getPerformance(force: boolean): Promise<Performance> {
-  const snapshots = readJson<Snapshot[]>('snapshots.json', [])
+  const snapshots = readStore<Snapshot[]>('snapshots.json', [])
   let state = stored()
   const fresh = !!state && Date.now() - new Date(state.fetchedAt).getTime() < FRESH_MS
   if (!state || force || !fresh) {
@@ -303,5 +304,6 @@ export async function getPerformance(force: boolean): Promise<Performance> {
 
 /** Delete stored history. Waits for any GitHub job in flight, so it cannot write the file back afterwards. */
 export function clearHistory(name: 'performance.json' | 'snapshots.json'): Promise<void> {
-  return serial(async () => rmSync(path(name), { force: true }))
+  // Snapshots cannot be fetched again, so they are emptied (and stay in the backups) rather than deleted.
+  return serial(async () => (name === 'snapshots.json' ? writeStore('snapshots.json', []) : rmSync(path(name), { force: true })))
 }

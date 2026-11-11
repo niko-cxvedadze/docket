@@ -1,14 +1,16 @@
 import { useState } from 'react'
-import { Popover } from 'radix-ui'
-import { ChevronDown, EyeOff, Video, MessageSquareCheck, NotebookPen, Search, Users, X } from 'lucide-react'
+import { ChevronDown, EyeOff, Keyboard, Video, MessageSquareCheck, NotebookPen, Search, Users, X } from 'lucide-react'
 import type { CiState, Level, PrSummary, ReviewProgress } from '../../shared/types'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Toggle } from '@/components/ui/toggle'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 
 /** The select needs a non-empty value for "every repository". */
 const ALL_REPOS = '__all__'
@@ -113,8 +115,8 @@ function AuthorFilter({ prs, selected, onChange }: { prs: PrSummary[]; selected:
   const label = selected.length === 0 ? 'All authors' : selected.length === 1 ? selected[0] : `${selected.length} authors`
 
   return (
-    <Popover.Root onOpenChange={(open) => !open && setQuery('')}>
-      <Popover.Trigger asChild>
+    <Popover onOpenChange={(open) => !open && setQuery('')}>
+      <PopoverTrigger asChild>
         <Button
           variant="outline"
           size="sm"
@@ -125,48 +127,42 @@ function AuthorFilter({ prs, selected, onChange }: { prs: PrSummary[]; selected:
           <span className="truncate">{label}</span>
           <ChevronDown className="opacity-50" aria-hidden />
         </Button>
-      </Popover.Trigger>
-      <Popover.Portal>
-        <Popover.Content
-          align="start"
-          sideOffset={4}
-          className="z-50 w-64 rounded-md border bg-popover p-1.5 text-popover-foreground shadow-md"
-        >
-          {authors.length > 8 && (
-            <Input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Find an author"
-              aria-label="Find an author"
-              className="mb-1.5 h-7 text-[13px] md:text-[13px]"
-            />
-          )}
-          <ul className="max-h-72 overflow-auto" aria-label="Authors">
-            {shown.map(([login, a]) => (
-              <li key={login}>
-                <Label className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-[13px] font-normal hover:bg-accent">
-                  <Checkbox checked={selected.includes(login)} onCheckedChange={() => toggle(login)} />
-                  {a.avatarUrl ? (
-                    <img src={a.avatarUrl} alt="" className="size-4 rounded-full" />
-                  ) : (
-                    <span className="size-4 rounded-full bg-secondary" aria-hidden />
-                  )}
-                  <span className="min-w-0 flex-1 truncate">{login}</span>
-                  <span className="text-xs text-muted-foreground tabular-nums">{a.count}</span>
-                </Label>
-              </li>
-            ))}
-            {shown.length === 0 && <li className="px-2 py-1.5 text-xs text-muted-foreground">No author matches.</li>}
-          </ul>
-          {selected.length > 0 && (
-            <Button variant="ghost" size="sm" className="mt-1 h-7 w-full justify-start px-2 text-xs" onClick={() => onChange([])}>
-              <X aria-hidden />
-              Show all authors
-            </Button>
-          )}
-        </Popover.Content>
-      </Popover.Portal>
-    </Popover.Root>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-64 p-1.5">
+        {authors.length > 8 && (
+          <Input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Find an author"
+            aria-label="Find an author"
+            className="mb-1.5 h-7 text-[13px] md:text-[13px]"
+          />
+        )}
+        <ul className="max-h-72 overflow-auto" aria-label="Authors">
+          {shown.map(([login, a]) => (
+            <li key={login}>
+              <Label className="flex cursor-pointer items-center gap-2 rounded-sm px-2 py-1.5 text-[13px] font-normal hover:bg-accent">
+                <Checkbox checked={selected.includes(login)} onCheckedChange={() => toggle(login)} />
+                {a.avatarUrl ? (
+                  <img src={a.avatarUrl} alt="" className="size-4 rounded-full" />
+                ) : (
+                  <span className="size-4 rounded-full bg-secondary" aria-hidden />
+                )}
+                <span className="min-w-0 flex-1 truncate">{login}</span>
+                <span className="text-xs text-muted-foreground tabular-nums">{a.count}</span>
+              </Label>
+            </li>
+          ))}
+          {shown.length === 0 && <li className="px-2 py-1.5 text-xs text-muted-foreground">No author matches.</li>}
+        </ul>
+        {selected.length > 0 && (
+          <Button variant="ghost" size="sm" className="mt-1 h-7 w-full justify-start px-2 text-xs" onClick={() => onChange([])}>
+            <X aria-hidden />
+            Show all authors
+          </Button>
+        )}
+      </PopoverContent>
+    </Popover>
   )
 }
 
@@ -187,31 +183,85 @@ function Chip({
   children: React.ReactNode
 }) {
   return (
-    <button
-      type="button"
-      aria-pressed={on}
-      title={title}
-      onClick={onClick}
-      className={cn(
-        'inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-[13px] transition-colors focus-visible:outline-2 focus-visible:outline-ring [&>svg]:size-3.5',
-        on
-          ? 'border-primary bg-primary font-medium text-primary-foreground'
-          : 'border-input bg-background text-muted-foreground hover:border-muted-foreground/60 hover:text-foreground'
-      )}
-    >
-      <Icon aria-hidden />
-      {children}
-      {count !== undefined && (
-        <span
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Toggle
+          pressed={on}
+          onPressedChange={onClick}
+          variant="outline"
+          size="sm"
           className={cn(
-            'rounded-full px-1.5 text-[11px] font-semibold tabular-nums',
-            on ? 'bg-primary-foreground/20' : 'bg-secondary text-foreground'
+            'h-8 gap-1.5 rounded-full bg-background px-3 text-[13px] font-normal text-muted-foreground shadow-none',
+            'hover:border-muted-foreground/60 hover:bg-background hover:text-foreground',
+            // The tooltip around it sets its own data-state, so the pressed look keys on aria-pressed instead.
+            'aria-pressed:border-primary aria-pressed:bg-primary aria-pressed:font-medium aria-pressed:text-primary-foreground aria-pressed:hover:bg-primary/90 aria-pressed:hover:text-primary-foreground',
+            '[&>svg]:size-3.5'
           )}
         >
-          {count}
-        </span>
-      )}
-    </button>
+          <Icon aria-hidden />
+          {children}
+          {count !== undefined && (
+            <span
+              className={cn(
+                'rounded-full px-1.5 text-[11px] font-semibold tabular-nums',
+                on ? 'bg-primary-foreground/20' : 'bg-secondary text-foreground'
+              )}
+            >
+              {count}
+            </span>
+          )}
+        </Toggle>
+      </TooltipTrigger>
+      <TooltipContent>{title}</TooltipContent>
+    </Tooltip>
+  )
+}
+
+const SHORTCUTS: { keys: string[]; what: string }[] = [
+  { keys: ['↩'], what: 'Open the focused pull request' },
+  { keys: ['⌘', 'click'], what: 'Select several pull requests' },
+  { keys: ['X'], what: 'Select or deselect the focused one' },
+  { keys: ['⌘', 'C'], what: 'Copy links to the selection, or the focused one' },
+  { keys: ['⌘', '⇧', 'C'], what: 'Copy every link in the focused stack' },
+  { keys: ['P'], what: 'Pin to the top of its column' },
+  { keys: ['B'], what: 'Copy the branch name' },
+  { keys: ['O'], what: 'Open on GitHub' },
+  { keys: ['Esc'], what: 'Clear the selection' }
+]
+
+/** What the keyboard does on the dashboard, since none of it is written on the rows. */
+function ShortcutsHelp() {
+  return (
+    <Popover>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <PopoverTrigger asChild>
+            <Button variant="ghost" size="icon-xs" className="text-muted-foreground" aria-label="Keyboard shortcuts">
+              <Keyboard aria-hidden />
+            </Button>
+          </PopoverTrigger>
+        </TooltipTrigger>
+        <TooltipContent>Keyboard shortcuts</TooltipContent>
+      </Tooltip>
+      <PopoverContent align="end" className="w-80 p-3">
+        <p className="mb-2 text-sm font-medium">Keyboard shortcuts</p>
+        <p className="mb-2.5 text-xs text-muted-foreground">Tab to a pull request first, or click one.</p>
+        <ul className="grid gap-1.5 text-xs">
+          {SHORTCUTS.map((s) => (
+            <li key={s.what} className="flex items-center justify-between gap-3">
+              <span className="text-muted-foreground">{s.what}</span>
+              <span className="flex shrink-0 gap-1">
+                {s.keys.map((k) => (
+                  <kbd key={k} className="rounded border bg-muted px-1.5 py-0.5 font-sans text-[11px] text-foreground">
+                    {k}
+                  </kbd>
+                ))}
+              </span>
+            </li>
+          ))}
+        </ul>
+      </PopoverContent>
+    </Popover>
   )
 }
 
@@ -322,7 +372,7 @@ export function FilterBar({
           <Chip
             on={filters.drafting}
             onClick={() => set({ drafting: !filters.drafting })}
-            title="Show only pull requests where Claude is reviewing or you have an unposted review draft"
+            title="Only pull requests where Claude is reviewing or you have an unposted review draft"
             Icon={NotebookPen}
             count={drafting}
           >
@@ -333,7 +383,7 @@ export function FilterBar({
           <Chip
             on={filters.reviewed}
             onClick={() => set({ reviewed: !filters.reviewed })}
-            title="Show only other people's pull requests you have already reviewed"
+            title="Only other people's pull requests you have already reviewed"
             Icon={MessageSquareCheck}
             count={reviewed}
           >
@@ -344,7 +394,7 @@ export function FilterBar({
           <Chip
             on={filters.media}
             onClick={() => set({ media: !filters.media })}
-            title="Show only pull requests whose description has a video or screenshots"
+            title="Only pull requests whose description has a video or screenshots"
             Icon={Video}
             count={media}
           >
@@ -360,20 +410,23 @@ export function FilterBar({
           Hide draft PRs
         </Chip>
 
-        <span className="ml-auto flex items-center gap-1 text-xs text-muted-foreground" aria-live="polite">
-          {active ? (
-            <>
-              <span className="tabular-nums">
-                {shown} of {prs.length} shown
-              </span>
-              <Button variant="ghost" size="sm" className="h-7 gap-1 px-2 text-xs" onClick={() => onChange(NO_FILTERS)}>
-                <X aria-hidden />
-                Clear filters
-              </Button>
-            </>
-          ) : (
-            <span className="tabular-nums">{prs.length} pull requests</span>
-          )}
+        <span className="ml-auto flex items-center gap-1 text-xs text-muted-foreground">
+          <span aria-live="polite" className="flex items-center gap-1">
+            {active ? (
+              <>
+                <span className="tabular-nums">
+                  {shown} of {prs.length} shown
+                </span>
+                <Button variant="ghost" size="sm" className="h-7 gap-1 px-2 text-xs" onClick={() => onChange(NO_FILTERS)}>
+                  <X aria-hidden />
+                  Clear filters
+                </Button>
+              </>
+            ) : (
+              <span className="tabular-nums">{prs.length} pull requests</span>
+            )}
+          </span>
+          <ShortcutsHelp />
         </span>
       </div>
     </div>

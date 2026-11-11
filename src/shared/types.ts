@@ -72,6 +72,24 @@ export interface PrSummary {
   level: Level
   reasons: Reason[]
   draftState: 'none' | 'draft' | 'stale' | 'posted'
+  /**
+   * Only on the bottom open pull request of a stack: the parts below it that have already merged,
+   * in merge order, so the whole stack can be shown.
+   */
+  mergedBelow?: MergedStackPr[]
+}
+
+/** A part of a stack that has already merged. */
+export interface MergedStackPr {
+  key: string
+  number: number
+  title: string
+  url: string
+  mergedAt: string
+  additions: number
+  deletions: number
+  baseRef: string
+  headRef: string
 }
 
 export interface PrList {
@@ -168,6 +186,22 @@ export interface PostRequest {
   comments: { path: string; line: number; body: string }[]
 }
 
+/** A review as it was posted to GitHub, kept for the Review tab's history whatever happens to the draft. */
+export interface PostedReview {
+  id: string
+  /** The pull request it was posted on. */
+  key: string
+  at: string
+  url: string
+  verdict: Verdict
+  /** The review body as posted: the summary, plus comments that could not go on a line. */
+  body: string
+  comments: { path: string; line: number; body: string }[]
+  headSha: string
+  model?: string
+  effort?: string
+}
+
 export interface MergedPr {
   key: string
   title: string
@@ -233,7 +267,12 @@ export interface VoiceSettings {
   /** Set when the guide was last generated from the reviewer's own GitHub comments. */
   learnedAt?: string
   learnedFrom?: number
+  /** How long the review summary may be. Concise unless the reviewer asks for more. */
+  summaryLength: SummaryLength
 }
+
+export const SUMMARY_LENGTHS = ['concise', 'standard', 'detailed'] as const
+export type SummaryLength = (typeof SUMMARY_LENGTHS)[number]
 
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 export type Effort = (typeof EFFORTS)[number]
@@ -252,6 +291,70 @@ export interface ReviewOptions {
 export interface Settings {
   voice: VoiceSettings
   review: ReviewOptions
+  /** The same choices for questions about a pull request; verbosity sets how long answers are. */
+  chat: ReviewOptions
+}
+
+export interface ChatMessage {
+  id: string
+  role: 'user' | 'assistant'
+  text: string
+  at: string
+  /** Set when the answer did not finish; `text` then holds whatever arrived. */
+  error?: string
+}
+
+/** A conversation with Claude about one pull request. */
+export interface Chat {
+  id: string
+  /** The pull request it is about. */
+  key: string
+  /** The first question, shortened; names the conversation in the history. */
+  title: string
+  createdAt: string
+  updatedAt: string
+  /** The claude CLI session the conversation continues in. */
+  sessionId: string
+  /** Where the session runs: the pull request's own checkout, or an empty folder when only the diff is available. */
+  cwd: string
+  /** The commit Claude last saw, so new pushes can be passed on. */
+  headSha: string
+  messages: ChatMessage[]
+}
+
+/** Progress of an answer: the text so far while it streams, then how it ended. */
+export interface ChatEvent {
+  key: string
+  chatId: string
+  state: 'running' | 'done' | 'error' | 'cancelled'
+  step?: string
+  partial?: string
+  error?: string
+}
+
+export type NoticeKind =
+  | 'review-done'
+  | 'review-failed'
+  | 'chat-done'
+  | 'chat-failed'
+  | 'needs-you'
+  | 'ci-failed'
+  | 'ci-passed'
+  | 'approved'
+  | 'changes-requested'
+  | 'ready'
+
+/** Something Docket told the user about, kept for the bell's list. */
+export interface Notice {
+  id: string
+  at: string
+  kind: NoticeKind
+  title: string
+  body: string
+  /** The pull request it is about; absent when it covers several. */
+  prKey?: string
+  prUrl?: string
+  read: boolean
 }
 
 /** Follow macOS, or force one appearance. */
@@ -297,8 +400,12 @@ export interface Api {
   rerunFailedJobs(repo: string, runIds: number[]): Promise<void>
   getDraft(key: string): Promise<ReviewDraft | null>
   saveDraft(draft: ReviewDraft): Promise<void>
-  discardDraft(key: string): Promise<void>
-  startReview(pr: PrSummary, focus: string): Promise<void>
+  /** `why` is logged, so a draft that goes missing can be traced. */
+  discardDraft(key: string, why: string): Promise<void>
+  /** Reviews posted on a pull request, newest first. */
+  listReviews(key: string): Promise<PostedReview[]>
+  /** `extend` keeps the current draft and adds only what it does not already have. Replaces by default. */
+  startReview(pr: PrSummary, focus: string, mode?: 'replace' | 'extend'): Promise<void>
   cancelReview(key: string): Promise<void>
   runningReviews(): Promise<ReviewProgress[]>
   postReview(req: PostRequest): Promise<{ url: string }>
@@ -310,6 +417,19 @@ export interface Api {
   /** Open the app's data folder in Finder. */
   revealStorage(): Promise<void>
   onReviewProgress(cb: (p: ReviewProgress) => void): () => void
+  /** The conversations about a pull request, most recent first, and which of them Claude is answering in. */
+  listChats(key: string): Promise<{ chats: Chat[]; running: string[] }>
+  /** Asks in conversation `chatId`, or starts a new one when it is null. Resolves with the conversation's id. */
+  sendChat(pr: PrSummary, chatId: string | null, question: string): Promise<string | null>
+  cancelChat(chatId: string): Promise<void>
+  deleteChat(chatId: string): Promise<void>
+  onChatEvent(cb: (e: ChatEvent) => void): () => void
+  listNotices(): Promise<Notice[]>
+  markNoticesRead(): Promise<void>
+  /** A new notice, for the toast and the bell. */
+  onNotice(cb: (n: Notice) => void): () => void
+  /** The user clicked a macOS notification: open what it is about. */
+  onOpenNotice(cb: (n: Notice) => void): () => void
   getTheme(): Promise<Theme>
   setTheme(theme: Theme): Promise<void>
   isFullScreen(): Promise<boolean>
