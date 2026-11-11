@@ -1,3 +1,5 @@
+<p align="center"><img src="build/icon.png" width="128" alt="Docket icon" /></p>
+
 # Docket
 
 A desktop dashboard for the pull requests that need you, with code reviews drafted by Claude.
@@ -43,15 +45,30 @@ Under Settings you can describe how you write review comments, or have Docket le
 
 Your merged pull requests, reviews given, review response time and commits, by week or by month, for all repositories or one.
 
-## Requirements
+## Install
 
-- macOS (built and tested there; other platforms are untested)
-- [Node.js](https://nodejs.org) 22 or newer and [pnpm](https://pnpm.io)
+1. Open the [latest release](https://github.com/niko-cxvedadze/docket/releases/latest) and download the `.dmg` for your Mac:
+   - `Docket-<version>-arm64.dmg` for Apple silicon (M1 and later)
+   - `Docket-<version>-x64.dmg` for Intel
+2. Open the `.dmg` and drag Docket into Applications.
+3. Docket is not notarised by Apple, so macOS blocks it the first time. Clear the download flag once and it opens normally:
+
+   ```sh
+   xattr -cr /Applications/Docket.app
+   ```
+
+   Or try to open it, then go to System Settings → Privacy & Security and choose **Open Anyway**.
+
+Docket needs two tools you sign in to yourself:
+
 - [GitHub CLI](https://cli.github.com), signed in: `gh auth login`
 - [Claude Code](https://claude.com/claude-code), signed in. Only needed for drafting reviews and learning your voice; the dashboard works without it.
-- `git`
 
-## Getting started
+It is built and tested on macOS only.
+
+## Development
+
+You need [Node.js](https://nodejs.org) 22 or newer, [pnpm](https://pnpm.io) and `git`, plus the two tools above.
 
 ```sh
 git clone https://github.com/niko-cxvedadze/docket.git
@@ -60,16 +77,49 @@ pnpm install
 pnpm dev
 ```
 
-Other scripts:
-
 | Command | What it does |
 | --- | --- |
 | `pnpm dev` | Run the app with hot reload |
-| `pnpm build` | Build into `out/` |
-| `pnpm start` | Run the built app |
+| `pnpm build` | Compile into `out/` |
+| `pnpm start` | Run the compiled app |
+| `pnpm dist` | Build the installable app into `dist/` |
 | `pnpm typecheck` | Type-check the project |
 
-There is no packaged installer yet.
+## Building and releasing
+
+### Build the app locally
+
+```sh
+pnpm dist
+```
+
+This writes to `dist/`:
+
+- `Docket-<version>-arm64.dmg` and `Docket-<version>-x64.dmg`, the installers
+- matching `.zip` files
+- `mac-arm64/Docket.app` and `mac/Docket.app`, the app itself, which you can run or copy to Applications directly
+
+### Publish a release
+
+Releases are built by GitHub Actions ([release.yml](.github/workflows/release.yml)) whenever a version tag is pushed:
+
+1. Set the new version in `package.json`, for example `0.2.0`, and commit it.
+2. Tag that commit and push:
+
+   ```sh
+   git tag v0.2.0
+   git push origin master --tags
+   ```
+
+3. The workflow builds both installers and publishes them on the [releases page](https://github.com/niko-cxvedadze/docket/releases) with generated notes. It takes a few minutes. The tag must match the version in `package.json`.
+
+To upload a build you already made locally instead:
+
+```sh
+gh release create v0.2.0 dist/*.dmg dist/*.zip --title "Docket 0.2.0" --generate-notes
+```
+
+The app is signed ad hoc, not with an Apple Developer ID, which is why users need the one-time step under Install. The icon sources are in `build/` (`icon.svg` is the original).
 
 ## Keyboard
 

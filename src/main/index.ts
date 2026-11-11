@@ -168,6 +168,8 @@ ipcMain.handle('open:external', (_e, url: string) => {
 })
 
 void app.whenReady().then(() => {
+  // A packaged app carries its own icon; in development the dock would show Electron's.
+  if (!app.isPackaged) app.dock?.setIcon(join(__dirname, '../../build/icon.png'))
   createWindow()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()

@@ -1,7 +1,9 @@
 import { useState } from 'react'
-import { CircleAlert, CircleCheck, CircleDashed, CircleX } from 'lucide-react'
+import { ChevronRight, CircleAlert, CircleCheck, CircleDashed, CircleX } from 'lucide-react'
 import type { CheckLog, FailingCheck, PrSummary } from '../../shared/types'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { cn } from '@/lib/utils'
 import { cleanError } from './util'
 
@@ -76,7 +78,9 @@ export function CiStatus({ pr, className, limit = 3 }: { pr: CiProps; className?
   )
 }
 
-type LogState = { state: 'loading' } | { state: 'error'; error: string } | { state: 'done'; log: CheckLog }
+const linkButton = 'h-auto rounded-sm px-1 py-0.5 text-[13px] font-normal'
+
+type LogState ={ state: 'loading' } | { state: 'error'; error: string } | { state: 'done'; log: CheckLog }
 
 function CheckRow({ repo, check, pr }: { repo: string; check: FailingCheck; pr: CiProps }) {
   const [open, setOpen] = useState(false)
@@ -105,14 +109,14 @@ function CheckRow({ repo, check, pr }: { repo: string; check: FailingCheck; pr: 
           </span>
         )}
         {check.jobId !== null && (
-          <button className="link-button" onClick={toggle} aria-expanded={open}>
+          <Button variant="link" className={linkButton} onClick={toggle} aria-expanded={open}>
             {open ? 'Hide log' : 'Show why it failed'}
-          </button>
+          </Button>
         )}
         {check.url && (
-          <button className="link-button" onClick={() => void window.api.openExternal(check.url!)}>
+          <Button variant="link" className={linkButton} onClick={() => void window.api.openExternal(check.url!)}>
             Open run
-          </button>
+          </Button>
         )}
       </div>
       {open && log && (
@@ -154,8 +158,9 @@ export function CiDetails({ pr, className }: { pr: PrSummary; className?: string
       </div>
     )
   const required = pr.failingChecks.filter((c) => c.required).length
+  const count = pr.failingChecks.length
   return (
-    <div className={cn('grid gap-1.5', className)}>
+    <Collapsible className={cn('grid gap-1.5', className)}>
       <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
         <Headline pr={pr} />
         <span className="text-xs text-muted-foreground">
@@ -165,14 +170,24 @@ export function CiDetails({ pr, className }: { pr: PrSummary; className?: string
               : 'Merging is blocked until the checks pass.'
             : 'None of the failing checks is required, so they do not stop the merge.'}
         </span>
+        {count > 0 && (
+          <CollapsibleTrigger asChild>
+            <Button variant="ghost" size="xs" className="group text-muted-foreground">
+              <ChevronRight className="transition-transform group-data-[state=open]:rotate-90" aria-hidden />
+              {count === 1 ? '1 failed check' : `${count} failed checks`}
+            </Button>
+          </CollapsibleTrigger>
+        )}
       </div>
-      {pr.failingChecks.length > 0 && (
-        <ul className="grid max-h-[40vh] gap-1 overflow-auto">
-          {pr.failingChecks.map((c, i) => (
-            <CheckRow key={c.url ?? `${c.name}-${i}`} repo={pr.repo} check={c} pr={pr} />
-          ))}
-        </ul>
+      {count > 0 && (
+        <CollapsibleContent asChild>
+          <ul className="grid max-h-[40vh] gap-1 overflow-auto">
+            {pr.failingChecks.map((c, i) => (
+              <CheckRow key={c.url ?? `${c.name}-${i}`} repo={pr.repo} check={c} pr={pr} />
+            ))}
+          </ul>
+        </CollapsibleContent>
       )}
-    </div>
+    </Collapsible>
   )
 }
