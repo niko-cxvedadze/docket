@@ -9,8 +9,8 @@ import { cancelReview, runningReviews, startReview } from './review'
 import { getSettings, reviewDefaults, saveSettings } from './settings'
 import { learnVoice } from './voice'
 import { adoptOldChats, cancelChat, deleteChat, listChats, runningChats, sendChat } from './chat'
-import { pruneCheckouts } from './repo'
-import { accountFor, enabledAccounts, enabledAccountsIfKnown, listAccounts, rememberAccounts, setAccountEnabled } from './accounts'
+import { pruneCheckouts, validRepo } from './repo'
+import { accountFor, enabledAccounts, enabledAccountsIfKnown, listAccounts, rememberAccounts, setAccountEnabled, signedIn } from './accounts'
 import { listNotices, markNoticesRead, noticeChanges, notify, setNoticeWindow } from './notify'
 import { readStore, writeStore } from './persist'
 import { clearStorage, revealStorage, storageUsage } from './storage'
@@ -190,12 +190,6 @@ ipcMain.handle('prs:list', async (_e, force?: boolean): Promise<PrList> => {
     return withDrafts({ ...cached, notice: `Showing the list from ${clock(cached.fetchedAt)}. ${short(e)}` })
   }
 })
-/** The account the window names, once gh confirms it is signed in to it. Everything per account goes through this. */
-const signedIn = async (account: unknown): Promise<string> => {
-  if (typeof account !== 'string' || !(await listAccounts()).some((a) => a.login === account)) throw new Error('Not a signed-in GitHub account.')
-  return account
-}
-
 ipcMain.handle('prs:open', async (_e, account: string, repos: string[]) => {
   const list = Array.isArray(repos) ? repos.filter((r) => typeof r === 'string').sort() : []
   const as = await signedIn(account)
@@ -214,7 +208,6 @@ ipcMain.handle('prs:open', async (_e, account: string, repos: string[]) => {
 ipcMain.handle('performance:get', async (_e, account: string, force: boolean) => getPerformance(await signedIn(account), !!force))
 // The window says which account a pull request is listed for; everything done to it is done as that account.
 ipcMain.handle('pr:detail', async (_e, account: string, repo: string, number: number) => prDetail(await signedIn(account), repo, number))
-const validRepo = (repo: unknown): repo is string => typeof repo === 'string' && /^[\w.-]+\/[\w.-]+$/.test(repo)
 for (const [channel, job] of [['check:log', checkLog], ['check:rerun-job', rerunJob]] as const)
   ipcMain.handle(channel, async (_e, account: string, repo: string, jobId: number) => {
     if (!validRepo(repo) || !Number.isSafeInteger(jobId)) throw new Error('Not a valid check.')

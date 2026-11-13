@@ -8,6 +8,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { Switch } from '@/components/ui/switch'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { cleanError, recall, remember } from './util'
+import { Avatar } from './Author'
 
 /** A GitHub account's profile picture, straight from its login. */
 const accountAvatar = (login: string): string => `https://github.com/${encodeURIComponent(login)}.png?size=80`
@@ -126,7 +127,7 @@ function ManageAccounts({ onChanged }: { onChanged: () => void }) {
             {accounts.map((a) => (
               <li key={a.login}>
                 <Label className="flex cursor-pointer items-center gap-2.5 rounded-sm px-2 py-1.5 font-normal hover:bg-accent">
-                  <img src={accountAvatar(a.login)} alt="" className="size-6 shrink-0 rounded-full bg-secondary" />
+                  <Avatar url={accountAvatar(a.login)} className="size-6" />
                   <span className="grid min-w-0 flex-1">
                     <span className="truncate text-[13px] font-medium">{a.login}</span>
                     <span className={a.problem ? 'text-xs text-danger' : 'text-xs text-muted-foreground'}>

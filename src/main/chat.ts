@@ -18,7 +18,8 @@ import { shortName, type Chat, type ChatEvent, type ChatMessage, type ExistingCo
 /** Every conversation, keyed by its own id. Several can belong to one pull request. */
 let chats: Record<string, Chat> | null = null
 
-const titleOf = (text: string): string => {
+/** A conversation's name in the history: its first question, shortened. */
+export const titleOf = (text: string): string => {
   const line = text.trim().split('\n')[0]
   return line.length > 80 ? `${line.slice(0, 79)}…` : line
 }
@@ -153,14 +154,16 @@ const LENGTH: Record<Verbosity, string> = {
   detailed:
     'Answer in detail: explain the reasoning, point at the relevant code as path:line, include short excerpts where they help, and mention edge cases and trade-offs.'
 }
-export const withLength = (prompt: string): string => {
+const withLength = (prompt: string): string => {
   const style = LENGTH[getSettings().chat.verbosity]
   return style ? `${prompt}\n\n<answer_length>${style}</answer_length>` : prompt
 }
 
 // ---------- Running Claude ----------
 
-const running = new Map<string, { child?: ChildProcess; cancelled: boolean }>()
+type Entry = { child?: ChildProcess; cancelled: boolean }
+/** Conversations Claude is answering in right now, about pull requests and system maps alike, by id. */
+const running = new Map<string, Entry>()
 
 /** Ids of the conversations Claude is answering in right now. */
 export const runningChats = (): string[] => [...running.keys()]
@@ -172,7 +175,7 @@ export function cancelChat(id: string): void {
   r.child?.kill('SIGTERM')
 }
 
-export function ask(
+function ask(
   prompt: string,
   /** The claude session to start or continue, and the folder it runs in. */
   chat: Pick<Chat, 'sessionId' | 'cwd'>,
@@ -275,6 +278,95 @@ const message = (role: ChatMessage['role'], text: string, error?: string): ChatM
   ...(error ? { error } : {})
 })
 
+/** What every conversation has, whatever it is about. */
+interface Conversation {
+  id: string
+  sessionId: string
+  cwd: string
+  updatedAt: string
+  messages: ChatMessage[]
+}
+
+/** How an answer is going, for the window: the text so far while it streams, then how it ended. */
+type TurnEvent = Pick<ChatEvent, 'state' | 'step' | 'partial' | 'error'>
+
+/**
+ * Answers `question` in a conversation: the part every conversation shares. `prepare` gets the code
+ * ready and says where Claude runs; `prompt` builds what Claude is sent, knowing whether the session
+ * continues. The question and the answer are saved with `save` as they happen; `answered` runs
+ * just before the answer is saved, `after` once the window knows how it ended (not when stopped).
+ */
+export function answerTurn(
+  chat: Conversation,
+  question: string,
+  o: {
+    save: () => void
+    emit: (e: TurnEvent) => void
+    prepare: (step: (s: string) => void) => Promise<{ cwd: string; hasCode: boolean; release?: () => void }>
+    prompt: (started: boolean, step: (s: string) => void) => Promise<string> | string
+    answered?: () => void
+    after?: (error: string | null) => void
+  }
+): void {
+  if (running.has(chat.id)) return
+  const entry: Entry = { cancelled: false }
+  running.set(chat.id, entry)
+  // A conversation Claude never answered has no session to continue yet.
+  let started = chat.messages.some((m) => m.role === 'assistant' && !m.error)
+  chat.messages.push(message('user', question))
+  chat.updatedAt = new Date().toISOString()
+  o.save()
+
+  let partial = ''
+  let step = 'Thinking'
+  const progress = (): void => o.emit({ state: 'running', step, partial })
+  const onStep = (s: string): void => {
+    step = s
+    progress()
+  }
+  progress()
+
+  void (async () => {
+    let release: (() => void) | undefined
+    try {
+      const where = await o.prepare(onStep)
+      release = where.release
+      // A session continues only in the folder it started in. If that changed (the code became
+      // reachable, or was not this time), start a fresh session with the full context.
+      if (started && chat.cwd !== where.cwd) started = false
+      if (!started) chat.sessionId = randomUUID()
+      chat.cwd = where.cwd
+      mkdirSync(where.cwd, { recursive: true })
+      if (entry.cancelled) throw new Error('cancelled')
+      const prompt = await o.prompt(started, onStep)
+      const answer = await ask(withLength(prompt), chat, started, where.hasCode, entry, {
+        delta: (d) => {
+          partial += d
+          progress()
+        },
+        step: onStep
+      })
+      o.answered?.()
+      chat.messages.push(message('assistant', answer))
+      chat.updatedAt = new Date().toISOString()
+      o.save()
+      o.emit({ state: 'done' })
+      o.after?.(null)
+    } catch (e) {
+      const cancelled = entry.cancelled
+      const error = cancelled ? 'Stopped.' : (e as Error).message
+      chat.messages.push(message('assistant', partial.trim(), error))
+      chat.updatedAt = new Date().toISOString()
+      o.save()
+      o.emit({ state: cancelled ? 'cancelled' : 'error', error })
+      if (!cancelled) o.after?.(error)
+    } finally {
+      release?.()
+      running.delete(chat.id)
+    }
+  })()
+}
+
 /**
  * Ask Claude a question about a pull request, in conversation `chatId` or a new one when null.
  * Returns the conversation's id; the answer streams through `emit` and is saved with it.
@@ -298,79 +390,41 @@ export function sendChat(pr: PrSummary, chatId: string | null, question: string,
     headSha: '',
     messages: []
   }
-  const id = chat.id
-  if (running.has(id)) return id
-  const entry: { child?: ChildProcess; cancelled: boolean } = { cancelled: false }
-  running.set(id, entry)
-  chat.messages.push(message('user', text))
-  chat.updatedAt = now
-  all[id] = chat
-  persist()
-
-  let partial = ''
-  let step = 'Thinking'
   const owner = chat.account
-  const about = { key, account: owner, chatId: id }
-  const send = (e: Partial<ChatEvent>): void => emit({ ...about, state: 'running', step, partial, ...e })
-  const onStep = (s: string): void => {
-    step = s
-    send({})
-  }
-  send({})
-
-  void (async () => {
-    let checkout: Checkout | null = null
-    try {
-      // A conversation Claude never answered has no session to resume yet.
-      let started = !!existing && existing.messages.some((m) => m.role === 'assistant' && !m.error)
-      onStep('Checking for new commits')
-      const account = await accountFor(pr.repo, pr.number, chat.account ?? pr.account)
-      const detail = await prDetail(account, pr.repo, pr.number)
+  const about = { key, account: owner, chatId: chat.id }
+  // Set while the code is got ready, read when the prompt is built.
+  let account = ''
+  let detail: PrDetail | null = null
+  let checkout: Checkout | null = null
+  answerTurn(chat, text, {
+    save: () => {
+      all[chat.id] = chat
+      persist()
+    },
+    emit: (e) => emit({ ...about, ...e }),
+    prepare: async (step) => {
+      step('Checking for new commits')
+      account = await accountFor(pr.repo, pr.number, chat.account ?? pr.account)
+      detail = await prDetail(account, pr.repo, pr.number)
       // Every question checks the head GitHub reports now, so Claude never reads outdated code.
-      checkout = await prCheckout(pr, account, detail.headSha, onStep)
-      const cwd = checkout?.dir ?? emptyDir()
-      // A session resumes only in the folder it started in. If that changed (the code became
-      // reachable, or was not this time), start a fresh session with the full context.
-      if (started && chat.cwd !== cwd) started = false
-      if (!started) chat.sessionId = randomUUID()
-      chat.cwd = cwd
-      mkdirSync(cwd, { recursive: true })
-      const hasCode = !!checkout
-      const moved = started && chat.headSha !== detail.headSha
-      if (entry.cancelled) throw new Error('cancelled')
+      checkout = await prCheckout(pr, account, detail.headSha, step)
+      return { cwd: checkout?.dir ?? emptyDir(), hasCode: !!checkout, release: () => checkout?.done() }
+    },
+    prompt: async (started, step) => {
+      const d = detail!
+      const moved = started && chat.headSha !== d.headSha
       const diff = !started || moved ? await prDiff(account, pr.repo, pr.number) : ''
       const base = describeBase(checkout?.base ?? null)
-      const prompt = !started
-        ? firstPrompt(pr, detail, diff, hasCode, base, text)
-        : moved
-          ? updatePrompt(diff, base, text)
-          : text
-      onStep(hasCode ? 'Claude is reading the pull request' : 'Claude is reading the diff')
-      const answer = await ask(withLength(prompt), chat, started, hasCode, entry, {
-        delta: (d) => {
-          partial += d
-          send({})
-        },
-        step: onStep
-      })
-      chat.headSha = detail.headSha
-      chat.messages.push(message('assistant', answer))
-      chat.updatedAt = new Date().toISOString()
-      persist()
-      emit({ ...about, state: 'done' })
-      notify('chat-done', 'Claude answered', `${shortName(pr)}: ${chat.title}`, owner, key, pr.url)
-    } catch (e) {
-      const cancelled = entry.cancelled
-      const error = cancelled ? 'Stopped.' : (e as Error).message
-      chat.messages.push(message('assistant', partial.trim(), error))
-      chat.updatedAt = new Date().toISOString()
-      persist()
-      emit({ ...about, state: cancelled ? 'cancelled' : 'error', error })
-      if (!cancelled) notify('chat-failed', 'Claude could not answer', `${shortName(pr)}: ${error}`, owner, key, pr.url)
-    } finally {
-      checkout?.done()
-      running.delete(id)
-    }
-  })()
-  return id
+      step(checkout ? 'Claude is reading the pull request' : 'Claude is reading the diff')
+      return !started ? firstPrompt(pr, d, diff, !!checkout, base, text) : moved ? updatePrompt(diff, base, text) : text
+    },
+    answered: () => {
+      chat.headSha = detail!.headSha
+    },
+    after: (error) =>
+      error
+        ? notify('chat-failed', 'Claude could not answer', `${shortName(pr)}: ${error}`, owner, key, pr.url)
+        : notify('chat-done', 'Claude answered', `${shortName(pr)}: ${chat.title}`, owner, key, pr.url)
+  })
+  return chat.id
 }

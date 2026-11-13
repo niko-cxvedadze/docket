@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Check, ChevronsUpDown, CircleAlert, CircleCheck, CircleDashed, GitBranch, LoaderCircle, Network, RefreshCw, RotateCcw, ScanSearch, Search, Trash2, Waypoints, X } from 'lucide-react'
 import { toast } from 'sonner'
 import type { PrSummary } from '../../shared/types'
-import { mapId, type MapBranches, type MapFreshness, type MapProgress, type MapSummary, type SystemMap as SystemMapData } from '../../shared/sysmap'
+import { mapId, plural, type MapBranches, type MapFreshness, type MapProgress, type MapSummary, type SystemMap as SystemMapData } from '../../shared/sysmap'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
@@ -15,7 +15,7 @@ import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, Command
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Confirm } from './Confirm'
 import { ClaudeOptions, EFFORT_LABEL, MODEL_LABEL } from './ClaudeOptions'
-import { ago } from './util'
+import { ago, cleanError, recallJson, remember, useClock } from './util'
 import { cn } from '@/lib/utils'
 import { SystemView } from './map/SystemView'
 import { FeatureView } from './map/FeatureView'
@@ -25,8 +25,6 @@ import { freshOf, type Selection } from './map/kinds'
 
 type View = 'system' | 'features'
 
-const clean = (e: unknown): string => (e as Error).message.replace(/^Error invoking remote method '[^']+': Error: /, '')
-const plural = (n: number, one: string, many = `${one}s`): string => `${n} ${n === 1 ? one : many}`
 
 // ---------- What was on screen last time, per account ----------
 
@@ -37,38 +35,19 @@ interface Choice {
 }
 const choiceKey = (account: string): string => `docket.map.${account}`
 function loadChoice(account: string): Choice {
-  try {
-    const saved = JSON.parse(localStorage.getItem(choiceKey(account)) ?? '{}') as Partial<Choice>
-    return {
-      repo: typeof saved.repo === 'string' ? saved.repo : null,
-      branch: typeof saved.branch === 'string' ? saved.branch : null,
-      view: saved.view === 'features' ? 'features' : 'system'
-    }
-  } catch {
-    return { repo: null, branch: null, view: 'system' }
-  }
-}
-function saveChoice(account: string, choice: Choice): void {
-  try {
-    localStorage.setItem(choiceKey(account), JSON.stringify(choice))
-  } catch {
-    /* remembered for this session only */
+  const saved = recallJson<Partial<Choice>>(choiceKey(account), {})
+  return {
+    repo: typeof saved.repo === 'string' ? saved.repo : null,
+    branch: typeof saved.branch === 'string' ? saved.branch : null,
+    view: saved.view === 'features' ? 'features' : 'system'
   }
 }
 
-/** Re-renders every second while `on`, for a running clock. */
-function useTick(on: boolean): void {
-  const [, tick] = useState(0)
-  useEffect(() => {
-    if (!on) return
-    const t = setInterval(() => tick((n) => n + 1), 1000)
-    return () => clearInterval(t)
-  }, [on])
-}
-
-const elapsed = (since: string): string => {
+/** How long a scan has been running, as m:ss, ticking every second on its own. */
+function Elapsed({ since, className }: { since: string; className?: string }) {
+  useClock(1000)
   const s = Math.max(0, Math.floor((Date.now() - new Date(since).getTime()) / 1000))
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+  return <span className={cn('text-muted-foreground tabular-nums', className)}>{`${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`}</span>
 }
 
 // ---------- Toasts for scans, wherever the user is in the app ----------
@@ -182,10 +161,7 @@ const SCAN_PHASES: { phase: MapProgress['phase']; label: string }[] = [
 
 /** The whole page while a branch is scanned for the first time. */
 function ScanCard({ run, onStop }: { run: MapProgress; onStop: () => void }) {
-  useTick(true)
-  // A phase this page does not list (a main process from before a restart names them differently) counts as the last.
-  const found = SCAN_PHASES.findIndex((p) => p.phase === run.phase)
-  const at = found < 0 ? SCAN_PHASES.length - 1 : found
+  const at = SCAN_PHASES.findIndex((p) => p.phase === run.phase)
   return (
     <div className="grid flex-1 place-items-center overflow-auto p-10">
       <div className="grid w-full max-w-md gap-4 rounded-xl border bg-card p-6" role="status">
@@ -219,7 +195,7 @@ function ScanCard({ run, onStop }: { run: MapProgress; onStop: () => void }) {
           <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground" title={run.step}>
             {run.step}
           </span>
-          <span className="text-xs text-muted-foreground tabular-nums">{elapsed(run.startedAt)}</span>
+          <Elapsed since={run.startedAt} className="text-xs" />
           <Button variant="outline" size="xs" onClick={onStop}>
             Stop
           </Button>
@@ -235,7 +211,6 @@ function ScanCard({ run, onStop }: { run: MapProgress; onStop: () => void }) {
 
 /** A strip over the map while it is brought up to date or scanned again. */
 function ScanStrip({ run, onStop }: { run: MapProgress; onStop: () => void }) {
-  useTick(true)
   return (
     <div className="flex items-center gap-2.5 border-b bg-tint px-7 py-2 text-xs" role="status">
       <LoaderCircle className="size-3.5 shrink-0 animate-spin text-primary" aria-hidden />
@@ -247,7 +222,7 @@ function ScanStrip({ run, onStop }: { run: MapProgress; onStop: () => void }) {
         {run.step}
         {run.total > 0 && ` · ${run.done} of ${run.total}`}
       </span>
-      <span className="text-muted-foreground tabular-nums">{elapsed(run.startedAt)}</span>
+      <Elapsed since={run.startedAt} />
       <Button variant="outline" size="xs" className="bg-transparent" onClick={onStop}>
         Stop
       </Button>
@@ -269,9 +244,10 @@ export function SystemMap({ account, prs }: { account: string; /** The account's
   const [repo, setRepo] = useState<string | null>(saved.repo)
   const [branch, setBranch] = useState<string | null>(saved.branch)
   const [branches, setBranches] = useState<{ repo: string; data: MapBranches | null; error: string | null } | null>(null)
-  const [map, setMap] = useState<SystemMapData | null>(null)
-  /** The map `map` answers for; differs from the chosen one while that is still loading. */
-  const [loadedId, setLoadedId] = useState<string | null>(null)
+  // A list asked for another repository is on its way out.
+  const repoBranches = branches?.repo === repo ? branches : null
+  /** The last map loaded, and which one it is: while another is still loading, this one is not shown. */
+  const [loaded, setLoaded] = useState<{ id: string; map: SystemMapData | null } | null>(null)
   const [freshness, setFreshness] = useState<MapFreshness | null>(null)
   const [view, setView] = useState<View>(saved.view)
   const [selection, setSelection] = useState<Selection>(null)
@@ -281,6 +257,8 @@ export function SystemMap({ account, prs }: { account: string; /** The account's
 
   const repos = useMemo(() => [...new Set([...prs.map((p) => p.repo), ...(maps ?? []).map((m) => m.repo)])].sort((a, b) => a.localeCompare(b)), [prs, maps])
   const id = repo && branch ? mapId(account, repo, branch) : null
+  const ready = !!id && loaded?.id === id
+  const map = ready ? loaded.map : null
   const current = useRef<string | null>(null)
 
   const refreshList = useCallback(
@@ -295,12 +273,9 @@ export function SystemMap({ account, prs }: { account: string; /** The account's
     [account]
   )
   const fetchMap = useCallback((forId: string) => {
-    const got = (loaded: SystemMapData | null): void => {
+    const got = (m: SystemMapData | null): void => {
       if (current.current !== forId) return
-      // A map drawn before components listed what is inside them has none to show.
-      const m = loaded && { ...loaded, nodes: loaded.nodes.map((n) => ({ ...n, contents: n.contents ?? [] })) }
-      setMap(m)
-      setLoadedId(forId)
+      setLoaded({ id: forId, map: m })
       // A part an update removed cannot stay picked.
       setSelection((s) => (s && m && (s.type === 'node' ? m.nodes.some((n) => n.id === s.id) : m.features.some((f) => f.id === s.id)) ? s : null))
     }
@@ -343,7 +318,7 @@ export function SystemMap({ account, prs }: { account: string; /** The account's
     setBranches({ repo, data: null, error: null })
     window.api.mapBranches(account, repo).then(
       (data) => !stale && setBranches({ repo, data, error: null }),
-      (e) => !stale && setBranches({ repo, data: null, error: clean(e) })
+      (e) => !stale && setBranches({ repo, data: null, error: cleanError(e) })
     )
     return () => {
       stale = true
@@ -352,14 +327,12 @@ export function SystemMap({ account, prs }: { account: string; /** The account's
   // No branch chosen yet: the one already mapped, else the repository's default once GitHub has said which that is.
   useEffect(() => {
     if (!repo || branch) return
-    const pick = maps?.find((m) => m.repo === repo)?.branch ?? (branches?.repo === repo ? branches.data?.defaultBranch : null)
+    const pick = maps?.find((m) => m.repo === repo)?.branch ?? repoBranches?.data?.defaultBranch
     if (pick) setBranch(pick)
-  }, [repo, branch, maps, branches])
+  }, [repo, branch, maps, repoBranches])
 
   useEffect(() => {
     current.current = id
-    setMap(null)
-    setLoadedId(null)
     setSelection(null)
     setFreshness(null)
     if (!id) return
@@ -374,19 +347,19 @@ export function SystemMap({ account, prs }: { account: string; /** The account's
     window.addEventListener('focus', onFocus)
     return () => window.removeEventListener('focus', onFocus)
   }, [checkFreshness])
-  useEffect(() => saveChoice(account, { repo, branch, view }), [account, repo, branch, view])
+  useEffect(() => remember(choiceKey(account), JSON.stringify({ repo, branch, view })), [account, repo, branch, view])
 
   const run = id ? runs[id] : undefined
   const scanning = run?.state === 'running'
   const failed = run?.state === 'error' ? run : undefined
-  const fresh = useMemo(() => (map ? freshOf(map) : { added: new Set<string>(), changed: new Set<string>() }), [map])
+  const fresh = useMemo(() => freshOf(map), [map])
   const mappedBranches = useMemo(() => new Set((maps ?? []).filter((m) => m.repo === repo).map((m) => m.branch)), [maps, repo])
   const hintedBranches = useMemo(() => new Set(prs.filter((p) => p.repo === repo).flatMap((p) => [p.headRef, p.baseRef])), [prs, repo])
   const mappedRepos = useMemo(() => new Set((maps ?? []).map((m) => m.repo)), [maps])
 
   const scan = (mode: 'scan' | 'update'): void => {
     if (!repo || !branch) return
-    void window.api.mapScan(account, repo, branch, mode).catch((e) => toast.error(clean(e)))
+    void window.api.mapScan(account, repo, branch, mode).catch((e) => toast.error(cleanError(e)))
   }
   const stop = (): void => void (id && window.api.mapCancel(id))
   const dismiss = (): void =>
@@ -402,7 +375,6 @@ export function SystemMap({ account, prs }: { account: string; /** The account's
       fetchMap(id)
     })
   }
-  const select = (s: Selection): void => setSelection(s)
 
   if (!maps)
     return (
@@ -452,16 +424,16 @@ export function SystemMap({ account, prs }: { account: string; /** The account's
           </SelectContent>
         </Select>
         <BranchPicker
-          branches={branches?.repo === repo ? branches.data : null}
-          loading={!branches || branches.repo !== repo || (!branches.data && !branches.error)}
-          error={branches?.repo === repo ? branches.error : null}
+          branches={repoBranches?.data ?? null}
+          loading={!repoBranches || (!repoBranches.data && !repoBranches.error)}
+          error={repoBranches?.error ?? null}
           value={branch}
           mapped={mappedBranches}
           hinted={hintedBranches}
           onChange={setBranch}
         />
 
-        {map && loadedId === id && (
+        {map && (
           <div className="ml-auto flex items-center gap-2.5 text-xs text-muted-foreground">
             <span title={`The map describes commit ${map.headSha}`}>
               at <span className="font-mono">{map.headSha.slice(0, 7)}</span> · updated {ago(map.updatedAt)}
@@ -503,9 +475,9 @@ export function SystemMap({ account, prs }: { account: string; /** The account's
 
       {!branch ? (
         <div className="grid flex-1 place-items-center p-10 text-sm text-muted-foreground">
-          {branches?.repo === repo && branches.error ? `Could not list the branches: ${branches.error}` : 'Loading branches…'}
+          {repoBranches?.error ? `Could not list the branches: ${repoBranches.error}` : 'Loading branches…'}
         </div>
-      ) : loadedId !== id ? (
+      ) : !ready ? (
         <div className="flex-1 px-7 pt-5" aria-busy>
           <Skeleton className="h-64 rounded-xl" />
         </div>
@@ -584,19 +556,19 @@ export function SystemMap({ account, prs }: { account: string; /** The account's
               {view === 'system' ? (
                 // What it does beside what it is built from: a feature picked on the left is traced over the system on the right.
                 <div className="flex items-start gap-4">
-                  <FeatureRail map={map} selection={selection} onSelect={select} fresh={fresh} query={query} />
+                  <FeatureRail map={map} selection={selection} onSelect={setSelection} fresh={fresh} query={query} />
                   <div className="min-w-0 flex-1">
-                    <SystemView map={map} selection={selection} onSelect={select} fresh={fresh} query={query} connections={connections} />
+                    <SystemView map={map} selection={selection} onSelect={setSelection} fresh={fresh} query={query} connections={connections} />
                   </div>
                 </div>
               ) : (
-                <FeatureView map={map} selection={selection} onSelect={select} fresh={fresh} query={query} expandAll={expandAll} />
+                <FeatureView map={map} selection={selection} onSelect={setSelection} fresh={fresh} query={query} expandAll={expandAll} />
               )}
             </div>
             <MapDetail
               map={map}
               selection={selection}
-              onSelect={select}
+              onSelect={setSelection}
               fresh={fresh}
               view={view}
               onView={setView}

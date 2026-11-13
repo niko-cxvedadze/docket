@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { keyedQueue, run } from './env'
 import { tokenFor } from './accounts'
+import type { MapBranches } from '../shared/sysmap'
 
 /**
  * Local code for reviews and questions. Each repository is cloned once, without file contents
@@ -259,6 +260,9 @@ export async function pruneCheckouts(keep: Set<string>): Promise<void> {
 // clone, kept between scans so an update only has to fetch the new commits. Its name never ends
 // in a pull request number, so pruneCheckouts leaves it alone.
 
+/** Whether the window named a repository as owner/name. */
+export const validRepo = (repo: unknown): repo is string => typeof repo === 'string' && /^[\w.-]+\/[\w.-]+$/.test(repo)
+
 /** Whether a branch name is safe to hand to git and can exist on GitHub. */
 export const validBranch = (branch: unknown): branch is string =>
   typeof branch === 'string' &&
@@ -277,10 +281,10 @@ const mapRef = (branch: string): string => `refs/docket/map/${branchTag(branch)}
 const mapWorktree = (repo: string, branch: string): string => `${repo.replace('/', '__')}__map-${branchTag(branch)}`
 
 /** The repository's branches on GitHub and which of them is the default, without needing a clone. */
-export async function remoteBranches(repo: string, account: string): Promise<{ defaultBranch: string | null; branches: { name: string; sha: string }[] }> {
+export async function remoteBranches(repo: string, account: string): Promise<MapBranches> {
   const out = await git(account, ['ls-remote', '--symref', `https://github.com/${repo}.git`, 'HEAD', 'refs/heads/*'], undefined, 60_000)
   let defaultBranch: string | null = null
-  const branches: { name: string; sha: string }[] = []
+  const branches: MapBranches['branches'] = []
   for (const line of out.split('\n')) {
     const [left, right] = line.split('\t')
     if (!right) continue
@@ -299,22 +303,22 @@ export async function remoteHead(repo: string, branch: string, account: string):
 /**
  * A worktree of the branch as it is on GitHub now, fetched and checked out when it moved.
  * Unlike prCheckout this throws when the code cannot be fetched: a map cannot be drawn without it.
- * `asIs` reads the worktree where it stands when there is one, without asking GitHub: a question
- * about a map is about the commit the map describes, and must not move the code under a scan.
+ * When the worktree is already at commit `at`, GitHub is not asked: a question about a map is
+ * about the commit the map describes.
  */
 export function branchCheckout(
   repo: string,
   branch: string,
   account: string,
   step: (s: string) => void = () => {},
-  asIs = false
+  at?: string
 ): Promise<{ dir: string; head: string; done: () => void }> {
   const name = mapWorktree(repo, branch)
   const ref = mapRef(branch)
   return held(name, () =>
     locked(repo, async () => {
       const { dir, head } = await worktreeAt({ repo, name, account, ref, what: 'the branch', timeoutMs: 900_000 }, step, async (clone, current) => {
-        if (asIs && current) return
+        if (at && current === at) return
         step('Fetching the branch')
         await git(account, ['fetch', '--quiet', '--no-write-fetch-head', 'origin', `+refs/heads/${branch}:${ref}`], clone)
       })

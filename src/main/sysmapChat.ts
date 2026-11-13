@@ -1,26 +1,20 @@
 import { ipcMain, type BrowserWindow } from 'electron'
 import { randomUUID } from 'node:crypto'
-import type { ChildProcess } from 'node:child_process'
-import { readStore, writeStore } from './persist'
-import { ask, withLength } from './chat'
+import { keyedStore } from './persist'
+import { answerTurn, cancelChat, runningChats, titleOf } from './chat'
 import { branchCheckout } from './repo'
-import type { MapChat, MapChatEvent, MapChatMessage, MapSubject, SystemMap } from '../shared/sysmap'
+import type { MapChat, MapChatEvent, MapSubject, SystemMap } from '../shared/sysmap'
 
 /**
  * Questions about a system map: one conversation per component, per feature, or about the system
  * as a whole. Claude gets the map and the part being asked about, and reads the code in the
  * branch's own checkout, at the commit the map describes, to answer. Conversations are saved like
- * the ones about pull requests and continue in the same claude session.
+ * the ones about pull requests and are answered by the same runner (answerTurn in chat.ts).
  */
 
 // ---------- Saved conversations ----------
-// Read and replaced one at a time; an entry that cannot be read is left as it is.
 
-let store: Record<string, unknown> | null = null
-const all = (): Record<string, unknown> => (store ??= readStore<Record<string, unknown>>('sysmap-chats.json', {}))
-const persist = (): void => writeStore('sysmap-chats.json', store)
-
-function readable(raw: unknown): MapChat | null {
+const chats = keyedStore<MapChat>('sysmap-chats.json', (raw) => {
   const c = raw as Partial<MapChat> | null
   if (!c || typeof c !== 'object' || typeof c.id !== 'string' || typeof c.account !== 'string' || typeof c.mapId !== 'string' || !Array.isArray(c.messages)) return null
   const subject = c.subject
@@ -30,7 +24,6 @@ function readable(raw: unknown): MapChat | null {
     account: c.account,
     mapId: c.mapId,
     subject: subject && (subject.type === 'node' || subject.type === 'feature') && typeof subject.id === 'string' ? subject : { type: 'system', id: '' },
-    subjectName: c.subjectName ?? '',
     title: c.title ?? 'Conversation',
     createdAt: c.createdAt ?? now,
     updatedAt: c.updatedAt ?? now,
@@ -39,32 +32,16 @@ function readable(raw: unknown): MapChat | null {
     headSha: c.headSha ?? '',
     messages: c.messages
   }
-}
-
-const getChat = (id: string): MapChat | null => readable(all()[id])
-function saveChat(chat: MapChat): void {
-  all()[chat.id] = chat
-  persist()
-}
-
-const listChats = (mapId: string): MapChat[] =>
-  Object.values(all())
-    .map(readable)
-    .filter((c): c is MapChat => !!c && c.mapId === mapId)
-    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
-
-const titleOf = (text: string): string => {
-  const line = text.trim().split('\n')[0]
-  return line.length > 80 ? `${line.slice(0, 79)}…` : line
-}
-
-const message = (role: MapChatMessage['role'], text: string, error?: string): MapChatMessage => ({
-  id: randomUUID(),
-  role,
-  text,
-  at: new Date().toISOString(),
-  ...(error ? { error } : {})
 })
+
+const sameSubject = (a: MapSubject, b: MapSubject): boolean => a.type === b.type && a.id === b.id
+
+/** The conversations about one part of a map, most recent first. */
+const listChats = (mapId: string, subject: MapSubject): MapChat[] =>
+  chats
+    .list()
+    .filter((c) => c.mapId === mapId && sameSubject(c.subject, subject))
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
 
 // ---------- What Claude is told ----------
 
@@ -151,20 +128,11 @@ function nextPrompt(map: SystemMap, subject: MapSubject, head: string, moved: bo
 ${question}`
 }
 
-// ---------- Running Claude ----------
-
-const running = new Map<string, { child?: ChildProcess; cancelled: boolean }>()
-
-function cancel(id: string): void {
-  const r = running.get(id)
-  if (!r) return
-  r.cancelled = true
-  r.child?.kill('SIGTERM')
-}
+// ---------- Asking ----------
 
 function send(map: SystemMap, subject: MapSubject, chatId: string | null, question: string, emit: (e: MapChatEvent) => void): string | null {
   const text = question.trim().slice(0, 20_000)
-  const existing = chatId ? getChat(chatId) : null
+  const existing = chatId ? chats.get(chatId) : null
   if (!text || (chatId && !existing) || (existing && existing.mapId !== map.id)) return null
   const now = new Date().toISOString()
   const chat: MapChat = existing ?? {
@@ -172,7 +140,6 @@ function send(map: SystemMap, subject: MapSubject, chatId: string | null, questi
     account: map.account,
     mapId: map.id,
     subject,
-    subjectName: subjectText(map, subject)?.name ?? '',
     title: titleOf(text),
     createdAt: now,
     updatedAt: now,
@@ -181,62 +148,26 @@ function send(map: SystemMap, subject: MapSubject, chatId: string | null, questi
     headSha: '',
     messages: []
   }
-  const id = chat.id
-  if (running.has(id)) return id
-  const entry: { child?: ChildProcess; cancelled: boolean } = { cancelled: false }
-  running.set(id, entry)
-  chat.messages.push(message('user', text))
-  chat.updatedAt = now
-  saveChat(chat)
-
-  let partial = ''
-  let step = 'Thinking'
-  const event = (e: Partial<MapChatEvent>): void => emit({ account: map.account, mapId: map.id, chatId: id, subject: chat.subject, state: 'running', step, partial, ...e })
-  const onStep = (s: string): void => {
-    step = s
-    event({})
-  }
-  event({})
-
-  void (async () => {
-    let checkout: Awaited<ReturnType<typeof branchCheckout>> | null = null
-    try {
-      // A conversation Claude never answered has no session to continue yet.
-      let started = !!existing && existing.messages.some((m) => m.role === 'assistant' && !m.error)
-      // The code as the map describes it: the branch's worktree where the last scan left it.
-      checkout = await branchCheckout(map.repo, map.branch, map.account, onStep, true)
-      // A session continues only in the folder it started in.
-      if (started && chat.cwd !== checkout.dir) started = false
-      if (!started) chat.sessionId = randomUUID()
-      chat.cwd = checkout.dir
-      if (entry.cancelled) throw new Error('cancelled')
-      const prompt = started ? nextPrompt(map, chat.subject, checkout.head, chat.headSha !== map.headSha, text) : firstPrompt(map, chat.subject, checkout.head, text)
-      onStep('Claude is reading the code')
-      const answer = await ask(withLength(prompt), chat, started, true, entry, {
-        delta: (d) => {
-          partial += d
-          event({})
-        },
-        step: onStep
-      })
+  const about = { account: map.account, mapId: map.id, chatId: chat.id, subject: chat.subject }
+  let head = ''
+  answerTurn(chat, text, {
+    save: () => chats.set(chat.id, chat),
+    emit: (e) => emit({ ...about, ...e }),
+    // The code as the map describes it: the branch's worktree at the map's commit.
+    prepare: async (step) => {
+      const checkout = await branchCheckout(map.repo, map.branch, map.account, step, map.headSha)
+      head = checkout.head
+      return { cwd: checkout.dir, hasCode: true, release: checkout.done }
+    },
+    prompt: (started, step) => {
+      step('Claude is reading the code')
+      return started ? nextPrompt(map, chat.subject, head, chat.headSha !== map.headSha, text) : firstPrompt(map, chat.subject, head, text)
+    },
+    answered: () => {
       chat.headSha = map.headSha
-      chat.messages.push(message('assistant', answer))
-      chat.updatedAt = new Date().toISOString()
-      saveChat(chat)
-      emit({ account: map.account, mapId: map.id, chatId: id, subject: chat.subject, state: 'done' })
-    } catch (e) {
-      const cancelled = entry.cancelled
-      const error = cancelled ? 'Stopped.' : (e as Error).message
-      chat.messages.push(message('assistant', partial.trim(), error))
-      chat.updatedAt = new Date().toISOString()
-      saveChat(chat)
-      emit({ account: map.account, mapId: map.id, chatId: id, subject: chat.subject, state: cancelled ? 'cancelled' : 'error', error })
-    } finally {
-      checkout?.done()
-      running.delete(id)
     }
-  })()
-  return id
+  })
+  return chat.id
 }
 
 const validSubject = (s: unknown): s is MapSubject => {
@@ -247,9 +178,10 @@ const validSubject = (s: unknown): s is MapSubject => {
 /** Hooks questions about maps up to the window. `getMap` reads a saved map by its id. */
 export function registerMapChat(getWindow: () => BrowserWindow | null, getMap: (id: string) => SystemMap | null): void {
   const emit = (e: MapChatEvent): void => getWindow()?.webContents.send('map:chat', e)
-  ipcMain.handle('map:chats', (_e, mapId: string) => {
-    const chats = typeof mapId === 'string' ? listChats(mapId) : []
-    return { chats, running: chats.filter((c) => running.has(c.id)).map((c) => c.id) }
+  ipcMain.handle('map:chats', (_e, mapId: string, subject: MapSubject) => {
+    const list = typeof mapId === 'string' && validSubject(subject) ? listChats(mapId, subject) : []
+    const answering = new Set(runningChats())
+    return { chats: list, running: list.filter((c) => answering.has(c.id)).map((c) => c.id) }
   })
   ipcMain.handle('map:ask', (_e, mapId: string, subject: MapSubject, chatId: string | null, question: string) => {
     if (typeof mapId !== 'string' || !validSubject(subject) || typeof question !== 'string') return null
@@ -259,12 +191,11 @@ export function registerMapChat(getWindow: () => BrowserWindow | null, getMap: (
     return send(map, { type: subject.type, id: subject.id }, chatId, question, emit)
   })
   ipcMain.handle('map:chat-cancel', (_e, chatId: string) => {
-    if (typeof chatId === 'string') cancel(chatId)
+    if (typeof chatId === 'string') cancelChat(chatId)
   })
   ipcMain.handle('map:chat-delete', (_e, chatId: string) => {
-    if (typeof chatId !== 'string' || !(chatId in all())) return
-    cancel(chatId)
-    delete all()[chatId]
-    persist()
+    if (typeof chatId !== 'string') return
+    cancelChat(chatId)
+    chats.remove(chatId)
   })
 }

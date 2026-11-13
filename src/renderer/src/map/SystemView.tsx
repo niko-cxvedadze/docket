@@ -1,9 +1,9 @@
-import { useMemo, useRef, useState } from 'react'
-import type { MapNode, SystemMap } from '../../../shared/sysmap'
+import { memo, useMemo, useRef, useState } from 'react'
+import { NODE_KINDS, plural, type MapNode, type SystemMap } from '../../../shared/sysmap'
 import { Button } from '@/components/ui/button'
-import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
-import { EDGE_VERB, KIND_ORDER, KINDS, freshLabel, matches, useRects, type Fresh, type Rect, type Selection } from './kinds'
+import { EDGE_VERB, KINDS, freshLabel, matches, useRects, type Fresh, type Rect, type Selection } from './kinds'
+import { FreshBadge } from './parts'
 
 interface End {
   x: number
@@ -59,7 +59,7 @@ function EdgeLabel({ at, text }: { at: End; text: string }) {
  * the stores and outside services they lean on at the bottom, with a line for everything one part
  * does to another. Picking a part lights up its connections; picking a feature lights up its path.
  */
-export function SystemView({
+export const SystemView = memo(function SystemView({
   map,
   selection,
   onSelect,
@@ -108,6 +108,23 @@ export function SystemView({
     if (mode === 'feature') return new Set(steps.keys())
     return null
   }, [mode, focus, map.edges, steps])
+  // Worked out when the map or the search changes, not on every hover.
+  const hidden = useMemo(
+    () => new Set(map.nodes.filter((n) => !matches(query, n.name, n.summary, n.tech, n.paths, n.contents.map((i) => i.name))).map((n) => n.id)),
+    [map.nodes, query]
+  )
+  /** Each connection's curve, worked out again only when the cards move. */
+  const routes = useMemo(() => {
+    const out = new Map<string, ReturnType<typeof route>>()
+    const add = (from: string, to: string): void => {
+      const a = rects[from]
+      const b = rects[to]
+      if (a && b && !out.has(`${from}>${to}`)) out.set(`${from}>${to}`, route(a, b))
+    }
+    for (const e of map.edges) add(e.from, e.to)
+    for (const f of map.features) f.steps.forEach((s, i) => f.steps[i + 1] && add(s.node, f.steps[i + 1].node))
+    return out
+  }, [rects, map.edges, map.features])
   const featuresThrough = useMemo(() => {
     const count = new Map<string, number>()
     for (const f of map.features) for (const id of new Set(f.steps.map((s) => s.node))) count.set(id, (count.get(id) ?? 0) + 1)
@@ -117,10 +134,9 @@ export function SystemView({
   const card = (n: MapNode) => {
     const kind = KINDS[n.kind]
     const picked = selectedNode === n.id
-    const dim = (lit && !lit.has(n.id)) || !matches(query, n.name, n.summary, n.tech, n.paths, n.contents.map((i) => i.name))
+    const dim = (lit && !lit.has(n.id)) || hidden.has(n.id)
     // A store shows its tables, an app its screens: the first few by name, the rest counted.
     const shown = n.contents.slice(0, n.kind === 'data' ? 4 : 3)
-    const badge = freshLabel(fresh, 'node', n.id)
     const through = featuresThrough.get(n.id) ?? 0
     return (
       <Button
@@ -142,7 +158,7 @@ export function SystemView({
         <span className="flex items-center gap-1.5">
           <kind.Icon className={cn('size-3.5', kind.text)} aria-hidden />
           <span className="min-w-0 flex-1 truncate text-[13px] font-medium">{n.name}</span>
-          {badge && <Badge className={cn('px-1.5 py-0 text-[10px]', badge === 'New' ? 'bg-ready-bg text-ready' : 'bg-action-bg text-action')}>{badge}</Badge>}
+          <FreshBadge label={freshLabel(fresh, 'node', n.id)} className="px-1.5 py-0 text-[10px]" />
         </span>
         <span className="line-clamp-2 text-xs leading-snug text-muted-foreground">{n.summary}</span>
         {shown.length > 0 && (
@@ -158,7 +174,7 @@ export function SystemView({
         {(n.tech || through > 0) && (
           <span className="flex items-center gap-2 text-[11px] text-muted-foreground/80">
             <span className="min-w-0 flex-1 truncate">{n.tech}</span>
-            {through > 0 && <span className="shrink-0">{through === 1 ? '1 feature' : `${through} features`}</span>}
+            {through > 0 && <span className="shrink-0">{plural(through, 'feature')}</span>}
           </span>
         )}
         {steps.has(n.id) && mode === 'feature' && (
@@ -180,13 +196,12 @@ export function SystemView({
       {connections && (
         <svg className="pointer-events-none absolute top-0 left-0 overflow-visible" width={width} height={height} aria-hidden>
           {map.edges.map((e) => {
-            const a = rects[e.from]
-            const b = rects[e.to]
-            if (!a || !b || (mode === 'node' && (e.from === focus || e.to === focus))) return null
+            const r = routes.get(`${e.from}>${e.to}`)
+            if (!r || (mode === 'node' && (e.from === focus || e.to === focus))) return null
             return (
               <path
                 key={`${e.from}>${e.to}`}
-                d={route(a, b).d}
+                d={r.d}
                 fill="none"
                 markerEnd="url(#map-arrow)"
                 strokeWidth={1}
@@ -196,7 +211,7 @@ export function SystemView({
           })}
         </svg>
       )}
-      {KIND_ORDER.map((k) => {
+      {NODE_KINDS.map((k) => {
         const kind = KINDS[k]
         const nodes = map.nodes.filter((n) => n.kind === k)
         return (
@@ -222,13 +237,11 @@ export function SystemView({
           </marker>
         </defs>
         {map.edges.map((e) => {
-          const a = rects[e.from]
-          const b = rects[e.to]
-          if (!a || !b) return null
+          const r = routes.get(`${e.from}>${e.to}`)
           const out = mode === 'node' && e.from === focus
           const into = mode === 'node' && e.to === focus
-          if (!out && !into) return null
-          const { d, from, to } = route(a, b)
+          if (!r || (!out && !into)) return null
+          const { d, from, to } = r
           const text = `${EDGE_VERB[e.kind]}${e.label ? `: ${e.label}` : ''}`
           return (
             <g key={`${e.from}>${e.to}`}>
@@ -247,12 +260,11 @@ export function SystemView({
         })}
         {mode === 'feature' &&
           hops.map((h) => {
-            const a = rects[h.from]
-            const b = rects[h.to]
-            if (!a || !b) return null
-            return <path key={`${h.from}>${h.to}`} d={route(a, b).d} fill="none" markerEnd="url(#map-arrow)" strokeWidth={1.8} strokeDasharray="5 4" className="stroke-primary" />
+            const r = routes.get(`${h.from}>${h.to}`)
+            if (!r) return null
+            return <path key={`${h.from}>${h.to}`} d={r.d} fill="none" markerEnd="url(#map-arrow)" strokeWidth={1.8} strokeDasharray="5 4" className="stroke-primary" />
           })}
       </svg>
     </div>
   )
-}
+})

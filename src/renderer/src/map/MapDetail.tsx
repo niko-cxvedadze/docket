@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react'
 import { ArrowRight, FileCode, GitCommitHorizontal, Info, MessagesSquare, Network, Waypoints, X } from 'lucide-react'
-import type { MapFile, MapNode, MapNodeKind, MapRef, MapSubject, MapUpdate, SystemMap } from '../../../shared/sysmap'
+import { NODE_KINDS, plural, type MapEdge, type MapFeature, type MapFile, type MapNode, type MapNodeKind, type MapRef, type MapSubject, type MapUpdate, type SystemMap } from '../../../shared/sysmap'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -8,7 +8,8 @@ import { MapChat } from './MapChat'
 import { Markdown } from '../Markdown'
 import { ago } from '../util'
 import { cn } from '@/lib/utils'
-import { EDGE_VERB, KIND_ORDER, KINDS, freshLabel, type Fresh, type Selection } from './kinds'
+import { EDGE_VERB, KINDS, freshLabel, runsThrough, type Fresh, type Selection } from './kinds'
+import { FreshBadge, NodeChip } from './parts'
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -19,20 +20,24 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   )
 }
 
-/** A component, small, as something to click through to. */
-function NodeChip({ node, onSelect }: { node: MapNode; onSelect: (s: Selection) => void }) {
-  const kind = KINDS[node.kind]
+/** One side of a component's connections: what it acts on (`out`), or what acts on it. */
+function Connections({ title, edges, out, byId, onSelect }: { title: string; edges: MapEdge[]; out: boolean; byId: Map<string, MapNode>; onSelect: (s: Selection) => void }) {
+  if (!edges.length) return null
   return (
-    <Button
-      variant="outline"
-      size="xs"
-      title={`${kind.label}: ${node.summary}`}
-      onClick={() => onSelect({ type: 'node', id: node.id })}
-      className={cn('max-w-full justify-start bg-card font-normal shadow-none dark:bg-card', kind.border)}
-    >
-      <kind.Icon className={kind.text} aria-hidden />
-      <span className="truncate">{node.name}</span>
-    </Button>
+    <Section title={title}>
+      <ul className="grid gap-1.5">
+        {edges.map((e) => {
+          const other = byId.get(out ? e.to : e.from)
+          return (
+            <li key={out ? e.to : e.from} className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs">
+              {out && <span className="text-muted-foreground">{EDGE_VERB[e.kind]}</span>}
+              {other && <NodeChip node={other} onSelect={onSelect} />}
+              <span className="text-muted-foreground">{out ? e.label : `${EDGE_VERB[e.kind]} it${e.label ? `: ${e.label}` : ''}`}</span>
+            </li>
+          )
+        })}
+      </ul>
+    </Section>
   )
 }
 
@@ -72,15 +77,12 @@ const CONTENTS_TITLE: Record<MapNodeKind, string> = {
   job: 'Inside it'
 }
 
-const freshBadge = (label: 'New' | 'Changed' | null): ReactNode =>
-  label && <Badge className={label === 'New' ? 'bg-ready-bg text-ready' : 'bg-action-bg text-action'}>{label} in the last update</Badge>
-
 function NodeDetail({ map, node, onSelect, fresh, onView }: { map: SystemMap; node: MapNode; onSelect: (s: Selection) => void; fresh: Fresh; onView: (v: 'system' | 'features') => void }) {
   const kind = KINDS[node.kind]
   const byId = new Map(map.nodes.map((n) => [n.id, n]))
   const out = map.edges.filter((e) => e.from === node.id)
   const into = map.edges.filter((e) => e.to === node.id)
-  const features = map.features.filter((f) => f.steps.some((s) => s.node === node.id))
+  const features = map.features.filter((f) => runsThrough(f, node.id))
   return (
     <>
       <header className="flex flex-col items-start gap-1.5">
@@ -90,7 +92,7 @@ function NodeDetail({ map, node, onSelect, fresh, onView }: { map: SystemMap; no
         </div>
         <h2 className="text-lg leading-tight font-semibold tracking-tight">{node.name}</h2>
         {node.tech && <p className="text-xs text-muted-foreground">{node.tech}</p>}
-        {freshBadge(freshLabel(fresh, 'node', node.id))}
+        <FreshBadge label={freshLabel(fresh, 'node', node.id)} suffix=" in the last update" />
       </header>
       <p className="text-sm leading-relaxed">{node.summary}</p>
       {node.description ? (
@@ -124,33 +126,8 @@ function NodeDetail({ map, node, onSelect, fresh, onView }: { map: SystemMap; no
           </dl>
         </Section>
       )}
-      {out.length > 0 && (
-        <Section title="What it acts on">
-          <ul className="grid gap-1.5">
-            {out.map((e) => (
-              <li key={e.to} className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs">
-                <span className="text-muted-foreground">{EDGE_VERB[e.kind]}</span>
-                {byId.has(e.to) && <NodeChip node={byId.get(e.to)!} onSelect={onSelect} />}
-                {e.label && <span className="text-muted-foreground">{e.label}</span>}
-              </li>
-            ))}
-          </ul>
-        </Section>
-      )}
-      {into.length > 0 && (
-        <Section title="What acts on it">
-          <ul className="grid gap-1.5">
-            {into.map((e) => (
-              <li key={e.from} className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-xs">
-                {byId.has(e.from) && <NodeChip node={byId.get(e.from)!} onSelect={onSelect} />}
-                <span className="text-muted-foreground">
-                  {EDGE_VERB[e.kind]} it{e.label ? `: ${e.label}` : ''}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </Section>
-      )}
+      <Connections title="What it acts on" edges={out} out byId={byId} onSelect={onSelect} />
+      <Connections title="What acts on it" edges={into} out={false} byId={byId} onSelect={onSelect} />
       <Section title={features.length ? `Features that run through it (${features.length})` : 'Features that run through it'}>
         {features.length ? (
           <ul className="grid gap-1">
@@ -193,21 +170,19 @@ function NodeDetail({ map, node, onSelect, fresh, onView }: { map: SystemMap; no
 
 function FeatureDetail({
   map,
-  featureId,
+  feature,
   onSelect,
   fresh,
   view,
   onView
 }: {
   map: SystemMap
-  featureId: string
+  feature: MapFeature
   onSelect: (s: Selection) => void
   fresh: Fresh
   view: 'system' | 'features'
   onView: (v: 'system' | 'features') => void
 }) {
-  const feature = map.features.find((f) => f.id === featureId)
-  if (!feature) return null
   const byId = new Map(map.nodes.map((n) => [n.id, n]))
   return (
     <>
@@ -217,7 +192,7 @@ function FeatureDetail({
           Feature in {feature.area}
         </div>
         <h2 className="text-lg leading-tight font-semibold tracking-tight">{feature.name}</h2>
-        {freshBadge(freshLabel(fresh, 'feature', feature.id))}
+        <FreshBadge label={freshLabel(fresh, 'feature', feature.id)} suffix=" in the last update" />
       </header>
       <p className="text-sm leading-relaxed">{feature.summary}</p>
       {feature.description && (
@@ -288,7 +263,7 @@ function Change({ map, entry, onSelect, first }: { map: SystemMap; entry: MapUpd
     <li className="flex min-w-0 flex-col gap-1.5 rounded-lg border bg-background/60 p-2.5">
       <div className="flex flex-wrap items-baseline gap-x-2 text-xs whitespace-nowrap">
         <span className="font-medium">
-          {entry.kind === 'scan' ? 'Full scan' : `Update from ${entry.commitCount === 1 ? '1 commit' : `${entry.commitCount} commits`}`}
+          {entry.kind === 'scan' ? 'Full scan' : `Update from ${plural(entry.commitCount, 'commit')}`}
         </span>
         <span className="text-muted-foreground" title={new Date(entry.at).toLocaleString()}>
           {ago(entry.at)}
@@ -339,7 +314,7 @@ function Overview({ map, onSelect, actions }: { map: SystemMap; onSelect: (s: Se
       )}
       <Section title="On this map">
         <ul className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-xs">
-          {KIND_ORDER.map((k) => {
+          {NODE_KINDS.map((k) => {
             const count = map.nodes.filter((n) => n.kind === k).length
             return (
               <li key={k} className="flex items-center gap-1.5">
@@ -398,23 +373,19 @@ export function MapDetail({
   const [tab, setTab] = useState<'about' | 'ask'>('about')
   const subject: MapSubject = node ? { type: 'node', id: node.id } : feature ? { type: 'feature', id: feature.id } : { type: 'system', id: '' }
   const name = node?.name ?? feature?.name ?? map.title
-  // A window whose preload is older than this page (the app not restarted since an update) cannot ask yet.
-  const canAsk = typeof window.api.mapChats === 'function'
   return (
     <aside className="flex w-[372px] shrink-0 flex-col border-l bg-card" aria-label="Details">
       <div className="flex items-center gap-2 border-b px-3 py-2">
-        <Tabs value={canAsk ? tab : 'about'} onValueChange={(v) => setTab(v as 'about' | 'ask')}>
+        <Tabs value={tab} onValueChange={(v) => setTab(v as 'about' | 'ask')}>
           <TabsList className="h-8">
             <TabsTrigger value="about">
               <Info aria-hidden />
               About
             </TabsTrigger>
-            {canAsk && (
-              <TabsTrigger value="ask">
-                <MessagesSquare aria-hidden />
-                Ask Claude
-              </TabsTrigger>
-            )}
+            <TabsTrigger value="ask">
+              <MessagesSquare aria-hidden />
+              Ask Claude
+            </TabsTrigger>
           </TabsList>
         </Tabs>
         <span className="min-w-0 flex-1 truncate text-right text-xs text-muted-foreground" title={name}>
@@ -426,7 +397,7 @@ export function MapDetail({
           </Button>
         )}
       </div>
-      {tab === 'ask' && canAsk ? (
+      {tab === 'ask' ? (
         // One set of conversations per part: picking another part shows that part's own.
         <MapChat key={`${subject.type}:${subject.id}`} map={map} subject={subject} name={name} />
       ) : (
@@ -435,7 +406,7 @@ export function MapDetail({
             {node ? (
               <NodeDetail map={map} node={node} onSelect={onSelect} fresh={fresh} onView={onView} />
             ) : feature ? (
-              <FeatureDetail map={map} featureId={feature.id} onSelect={onSelect} fresh={fresh} view={view} onView={onView} />
+              <FeatureDetail map={map} feature={feature} onSelect={onSelect} fresh={fresh} view={view} onView={onView} />
             ) : (
               <Overview map={map} onSelect={onSelect} actions={actions} />
             )}

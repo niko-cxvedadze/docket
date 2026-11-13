@@ -8,7 +8,7 @@ import { Performance } from './Performance'
 import { Settings } from './Settings'
 import { Storage } from './Storage'
 import { MapScanNotices, SystemMap } from './SystemMap'
-import { ago } from './util'
+import { ago, cleanError, useClock } from './util'
 import {
   ChartLine,
   ChevronLeft,
@@ -98,14 +98,6 @@ function NeedsYou({ prs, account, onShow }: { prs: PrSummary[]; /** The account 
   )
 }
 
-/** Re-renders every half minute so relative times such as "updated 3m ago" keep up. */
-function useClock(ms = 30_000): void {
-  const [, tick] = useState(0)
-  useEffect(() => {
-    const t = setInterval(() => tick((n) => n + 1), ms)
-    return () => clearInterval(t)
-  }, [ms])
-}
 
 /** The shape of the dashboard while the first list loads: a filter bar and two columns of rows. */
 function DashboardSkeleton() {
@@ -168,7 +160,7 @@ export function App() {
           setList(await window.api.listPrs(f))
           setError(null)
         } catch (e) {
-          setError((e as Error).message.replace(/^Error invoking remote method '[^']+': Error: /, ''))
+          setError(cleanError(e))
         }
         const next = again.current
         again.current = null

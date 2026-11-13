@@ -1,16 +1,16 @@
-import { useMemo } from 'react'
+import { memo, useMemo } from 'react'
 import { Waypoints } from 'lucide-react'
-import type { MapFeature, SystemMap } from '../../../shared/sysmap'
+import type { SystemMap } from '../../../shared/sysmap'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
-import { freshLabel, matches, type Fresh, type Selection } from './kinds'
+import { areasOf, freshLabel, matches, runsThrough, type Fresh, type Selection } from './kinds'
 
 /**
  * The features, by product area, beside the system: what it does next to what it is built from.
  * Picking one draws its path over the system; with a component picked, the features that run
  * through it stay lit and the rest fade.
  */
-export function FeatureRail({
+export const FeatureRail = memo(function FeatureRail({
   map,
   selection,
   onSelect,
@@ -23,14 +23,10 @@ export function FeatureRail({
   fresh: Fresh
   query: string
 }) {
-  const areas = useMemo(() => {
-    const grouped = new Map<string, MapFeature[]>()
-    for (const f of map.features) grouped.set(f.area, [...(grouped.get(f.area) ?? []), f])
-    return [...grouped].map(([name, features]) => ({ name, features }))
-  }, [map.features])
+  const areas = useMemo(() => areasOf(map.features), [map.features])
   const pickedFeature = selection?.type === 'feature' ? selection.id : null
   const pickedNode = selection?.type === 'node' ? map.nodes.find((n) => n.id === selection.id) : undefined
-  const through = pickedNode ? map.features.filter((f) => f.steps.some((s) => s.node === pickedNode.id)).length : 0
+  const through = pickedNode ? map.features.filter((f) => runsThrough(f, pickedNode.id)).length : 0
 
   return (
     // In a narrow window the system needs the room; the features are then one tab away.
@@ -57,7 +53,7 @@ export function FeatureRail({
           <div className="px-1 pb-0.5 text-[10px] font-semibold tracking-wide text-muted-foreground uppercase">{area.name}</div>
           {area.features.map((f) => {
             const picked = pickedFeature === f.id
-            const dim = (pickedNode ? !f.steps.some((s) => s.node === pickedNode.id) : false) || !matches(query, f.name, f.summary, f.area)
+            const dim = (pickedNode ? !runsThrough(f, pickedNode.id) : false) || !matches(query, f.name, f.summary, f.area, f.paths)
             const badge = freshLabel(fresh, 'feature', f.id)
             return (
               <Button
@@ -83,4 +79,4 @@ export function FeatureRail({
       {!map.features.length && <p className="px-1 text-xs text-muted-foreground">No features were found on this branch.</p>}
     </nav>
   )
-}
+})

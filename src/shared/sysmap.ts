@@ -1,3 +1,5 @@
+import type { ChatMessage } from './types'
+
 /**
  * The system map: what a codebase is built from (components), what it does (features), and how
  * each feature runs through the components. One map per repository and branch, built by Claude
@@ -131,21 +133,10 @@ export interface SystemMap {
   features: MapFeature[]
   /** Newest first. */
   history: MapUpdate[]
-  /** What drew it, when that was chosen explicitly. */
-  model?: string
 }
 
-export interface MapSummary {
-  id: string
-  repo: string
-  branch: string
-  account: string
-  headSha: string
-  updatedAt: string
-  title: string
-  nodes: number
-  features: number
-}
+/** A saved map, as the list of them names it. */
+export type MapSummary = Pick<SystemMap, 'id' | 'repo' | 'branch' | 'updatedAt'>
 
 /** `study` covers both halves at once: components are studied while features are traced. */
 export type MapPhase = 'prepare' | 'survey' | 'study' | 'update'
@@ -193,14 +184,6 @@ export interface MapSubject {
   id: string
 }
 
-export interface MapChatMessage {
-  id: string
-  role: 'user' | 'assistant'
-  text: string
-  at: string
-  /** Set when the answer did not finish; `text` then holds whatever arrived. */
-  error?: string
-}
 
 /** A conversation with Claude about one part of a map. */
 export interface MapChat {
@@ -208,8 +191,6 @@ export interface MapChat {
   account: string
   mapId: string
   subject: MapSubject
-  /** The part's name when the conversation started, kept in case it is later renamed or removed. */
-  subjectName: string
   /** The first question, shortened. */
   title: string
   createdAt: string
@@ -219,7 +200,7 @@ export interface MapChat {
   cwd: string
   /** The commit the map described when Claude last answered, so a later update can be passed on. */
   headSha: string
-  messages: MapChatMessage[]
+  messages: ChatMessage[]
 }
 
 /** Progress of an answer: the text so far while it streams, then how it ended. */
@@ -233,6 +214,9 @@ export interface MapChatEvent {
   partial?: string
   error?: string
 }
+
+/** "3 features", "1 feature". */
+export const plural = (n: number, one: string, many = `${one}s`): string => `${n} ${n === 1 ? one : many}`
 
 export const mapId = (account: string, repo: string, branch: string): string => `${account}:${repo}@${branch}`
 
@@ -251,8 +235,8 @@ export interface SystemMapApi {
   mapCancel(id: string): Promise<void>
   mapDelete(id: string): Promise<void>
   onMapProgress(cb: (p: MapProgress) => void): () => void
-  /** The conversations about one map, most recent first, and which of them Claude is answering in. */
-  mapChats(mapId: string): Promise<{ chats: MapChat[]; running: string[] }>
+  /** The conversations about one part of a map, most recent first, and which of them Claude is answering in. */
+  mapChats(mapId: string, subject: MapSubject): Promise<{ chats: MapChat[]; running: string[] }>
   /** Asks about one part of a map in conversation `chatId`, or starts a new one when it is null. Resolves with the conversation's id. */
   mapAsk(mapId: string, subject: MapSubject, chatId: string | null, question: string): Promise<string | null>
   mapChatCancel(chatId: string): Promise<void>

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useState, type RefObject } from 'react'
 import { Boxes, Cloud, Database, DoorOpen, Timer, type LucideIcon } from 'lucide-react'
-import type { MapEdgeKind, MapNode, MapNodeKind, SystemMap } from '../../../shared/sysmap'
+import type { MapEdgeKind, MapFeature, MapNodeKind, SystemMap } from '../../../shared/sysmap'
 
 /** What is picked on the map: a component of the system, or a feature that runs through it. */
 export type Selection = { type: 'node' | 'feature'; id: string } | null
@@ -17,8 +17,6 @@ export interface KindStyle {
   /** The same colour for SVG strokes. */
   color: string
 }
-
-export const KIND_ORDER: MapNodeKind[] = ['entry', 'service', 'job', 'data', 'external']
 
 export const KINDS: Record<MapNodeKind, KindStyle> = {
   entry: {
@@ -92,8 +90,8 @@ export interface Fresh {
   changed: Set<string>
 }
 
-export function freshOf(map: SystemMap): Fresh {
-  const last = map.history[0]
+export function freshOf(map: SystemMap | null): Fresh {
+  const last = map?.history[0]
   const keys = (refs: { type: string; id: string }[]): Set<string> => new Set(refs.map((r) => `${r.type}:${r.id}`))
   return last?.kind === 'update' ? { added: keys(last.added), changed: keys(last.changed) } : { added: new Set(), changed: new Set() }
 }
@@ -101,12 +99,14 @@ export function freshOf(map: SystemMap): Fresh {
 export const freshLabel = (fresh: Fresh, type: 'node' | 'feature', id: string): 'New' | 'Changed' | null =>
   fresh.added.has(`${type}:${id}`) ? 'New' : fresh.changed.has(`${type}:${id}`) ? 'Changed' : null
 
-/** The components a feature runs through, in the order it first reaches each. */
-export function nodesOfFeature(map: SystemMap, featureId: string): MapNode[] {
-  const feature = map.features.find((f) => f.id === featureId)
-  if (!feature) return []
-  const byId = new Map(map.nodes.map((n) => [n.id, n]))
-  return [...new Set(feature.steps.map((s) => s.node))].flatMap((id) => byId.get(id) ?? [])
+/** Whether a feature's path passes through a component. */
+export const runsThrough = (f: MapFeature, nodeId: string): boolean => f.steps.some((s) => s.node === nodeId)
+
+/** The features by product area, areas in the order they first appear. */
+export function areasOf(features: MapFeature[]): { name: string; features: MapFeature[] }[] {
+  const grouped = new Map<string, MapFeature[]>()
+  for (const f of features) grouped.set(f.area, [...(grouped.get(f.area) ?? []), f])
+  return [...grouped].map(([name, features]) => ({ name, features }))
 }
 
 export const matches = (query: string, ...fields: (string | string[])[]): boolean => {
@@ -147,10 +147,18 @@ export function useRects(container: RefObject<HTMLElement | null>, deps: unknown
   useEffect(() => {
     const el = container.current
     if (!el) return
-    const observer = new ResizeObserver(measure)
+    // Once per frame however many observed boxes changed, and never on the SVG drawn from the measurement.
+    let frame = 0
+    const observer = new ResizeObserver(() => {
+      cancelAnimationFrame(frame)
+      frame = requestAnimationFrame(measure)
+    })
     observer.observe(el)
-    for (const child of el.children) observer.observe(child)
-    return () => observer.disconnect()
+    for (const child of el.children) if (!(child instanceof SVGElement)) observer.observe(child)
+    return () => {
+      cancelAnimationFrame(frame)
+      observer.disconnect()
+    }
   }, [container, measure])
   return state
 }

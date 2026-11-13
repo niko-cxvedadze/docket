@@ -1,3 +1,5 @@
+import { useEffect, useState } from 'react'
+
 export function ago(iso: string): string {
   const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000)
   if (s < 60) return 'just now'
@@ -61,4 +63,13 @@ export function isCopyKey(e: KeyboardEvent): boolean {
   const el = document.activeElement
   if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) return false
   return !window.getSelection()?.toString()
+}
+
+/** Re-renders every `ms` (half a minute unless said) so relative times such as "updated 3m ago" keep up. */
+export function useClock(ms = 30_000): void {
+  const [, tick] = useState(0)
+  useEffect(() => {
+    const t = setInterval(() => tick((n) => n + 1), ms)
+    return () => clearInterval(t)
+  }, [ms])
 }

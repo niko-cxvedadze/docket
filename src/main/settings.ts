@@ -8,7 +8,8 @@ const MAX_GUIDE_CHARS = 8000
 let settings: Settings | null = null
 
 /** Fills in defaults and drops anything unexpected, for both the file on disk and what the window sends. */
-const LOGIN = /^[\w-]{1,61}$/
+/** A GitHub login: letters, digits and hyphens; accounts managed by a company also carry an underscore. */
+export const LOGIN = /^[A-Za-z\d][\w-]{0,60}$/
 
 function voiceOf(raw: unknown): Settings['voice'] {
   const voice = (raw ?? {}) as Partial<Settings['voice']>

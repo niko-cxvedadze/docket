@@ -15,7 +15,7 @@ export const systemMapApi: SystemMapApi = {
     ipcRenderer.on('map:progress', listener)
     return () => ipcRenderer.removeListener('map:progress', listener)
   },
-  mapChats: (mapId) => ipcRenderer.invoke('map:chats', mapId),
+  mapChats: (mapId, subject) => ipcRenderer.invoke('map:chats', mapId, subject),
   mapAsk: (mapId, subject, chatId, question) => ipcRenderer.invoke('map:ask', mapId, subject, chatId, question),
   mapChatCancel: (chatId) => ipcRenderer.invoke('map:chat-cancel', chatId),
   mapChatDelete: (chatId) => ipcRenderer.invoke('map:chat-delete', chatId),

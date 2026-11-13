@@ -1,18 +1,17 @@
-import { ipcMain, Notification, type BrowserWindow } from 'electron'
+import { ipcMain, type BrowserWindow } from 'electron'
 import type { ChildProcess } from 'node:child_process'
-import { readStore, writeStore } from './persist'
+import { keyedStore } from './persist'
 import { runClaude } from './review'
 import { getSettings, reviewDefaults } from './settings'
 import { run as exec } from './env'
-import { listAccounts } from './accounts'
+import { signedIn } from './accounts'
+import { notifyMacOS } from './notify'
 import { gh } from './github'
-import { branchCheckout, commitRange, dropBranchCheckout, remoteBranches, remoteHead, validBranch } from './repo'
+import { branchCheckout, commitRange, dropBranchCheckout, remoteBranches, remoteHead, validBranch, validRepo } from './repo'
 import { registerMapChat } from './sysmapChat'
 import {
   applyPatch,
   assemble,
-  bareComponent,
-  bareFeature,
   componentsOf,
   componentsPrompt,
   COMPONENTS_SCHEMA,
@@ -31,7 +30,7 @@ import {
   type StudiedComponent,
   type StudiedFeature
 } from './sysmapCore'
-import { mapId, type MapBranches, type MapFreshness, type MapProgress, type MapSummary, type MapUpdate, type SystemMap } from '../shared/sysmap'
+import { mapId, plural, type MapBranches, type MapFreshness, type MapProgress, type MapSummary, type MapUpdate, type SystemMap } from '../shared/sysmap'
 
 /**
  * System maps: one per repository and branch, drawn by Claude from a checkout of the branch.
@@ -44,11 +43,6 @@ import { mapId, type MapBranches, type MapFreshness, type MapProgress, type MapS
 
 // ---------- Saved maps ----------
 // A map takes minutes of Claude's work to draw, so it is kept like the user's other work: see persist.ts.
-// Entries are only ever read or replaced one at a time; one that cannot be read is left as it is.
-
-let store: Record<string, unknown> | null = null
-const all = (): Record<string, unknown> => (store ??= readStore<Record<string, unknown>>('sysmaps.json', {}))
-const persist = (): void => writeStore('sysmaps.json', store)
 
 /** Fills in whatever a map saved by an older version lacks. */
 function readable(raw: unknown): SystemMap | null {
@@ -70,35 +64,19 @@ function readable(raw: unknown): SystemMap | null {
     nodes: m.nodes.map((n) => ({ ...n, contents: n.contents ?? [] })),
     edges: m.edges ?? [],
     features: m.features ?? [],
-    history: m.history ?? [],
-    model: m.model
+    history: m.history ?? []
   }
 }
 
-const getMap = (id: string): SystemMap | null => readable(all()[id])
-
-function saveMap(map: SystemMap): void {
-  all()[map.id] = map
-  persist()
-}
-
-const summaryOf = (m: SystemMap): MapSummary => ({
-  id: m.id,
-  repo: m.repo,
-  branch: m.branch,
-  account: m.account,
-  headSha: m.headSha,
-  updatedAt: m.updatedAt,
-  title: m.title,
-  nodes: m.nodes.length,
-  features: m.features.length
-})
+const maps = keyedStore('sysmaps.json', readable)
+const getMap = (id: string): SystemMap | null => maps.get(id)
+const saveMap = (map: SystemMap): void => maps.set(map.id, map)
 
 const listMaps = (account: string): MapSummary[] =>
-  Object.values(all())
-    .map(readable)
-    .filter((m): m is SystemMap => !!m && m.account === account)
-    .map(summaryOf)
+  maps
+    .list()
+    .filter((m) => m.account === account)
+    .map(({ id, repo, branch, updatedAt }) => ({ id, repo, branch, updatedAt }))
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
 
 // ---------- Running Claude ----------
@@ -185,7 +163,6 @@ function batches<T>(items: T[]): T[][] {
   return Array.from({ length: Math.ceil(items.length / size) }, (_, i) => items.slice(i * size, (i + 1) * size))
 }
 
-const plural = (n: number, one: string, many = `${one}s`): string => `${n} ${n === 1 ? one : many}`
 
 // ---------- A full scan ----------
 
@@ -194,10 +171,10 @@ interface Checkout {
   head: string
 }
 
-/** Every tracked file of the checkout, so each pass can be told where its parts live instead of searching. */
+/** Every tracked file of the checkout, sorted, so each pass can be told where its parts live instead of searching. */
 async function trackedFiles(dir: string): Promise<string[]> {
   try {
-    return (await exec('git', ['ls-files'], { cwd: dir, timeoutMs: 60_000 })).split('\n').filter(Boolean)
+    return (await exec('git', ['ls-files'], { cwd: dir, timeoutMs: 60_000 })).split('\n').filter(Boolean).sort()
   } catch (e) {
     console.error('could not list the files of the checkout:', e)
     return []
@@ -226,7 +203,7 @@ async function scan(run: Run, checkout: Checkout, previous: SystemMap | null): P
   const studyComponents = (known: Outline[], batch: Outline[]) => async (): Promise<Studied> => {
     const under = filesUnder(files, batch.flatMap((o) => o.paths))
     const raw = await askTwice(run, dir, componentsPrompt(repo, branch, survey, known, batch, under), COMPONENTS_SCHEMA)
-    const result = raw ? componentsOf(raw, batch) : { studied: batch.map(bareComponent), discovered: [], missed: batch }
+    const result = componentsOf(raw, batch)
     unstudied.push(...result.missed.map((o) => o.name))
     step(batch.length)
     return { components: result.studied, features: [], discovered: result.discovered }
@@ -234,7 +211,7 @@ async function scan(run: Run, checkout: Checkout, previous: SystemMap | null): P
   const traceFeatures = (batch: FeatureOutline[]) => async (): Promise<Studied> => {
     const under = filesUnder(files, batch.flatMap((o) => o.paths))
     const raw = await askTwice(run, dir, featuresPrompt(repo, branch, survey, survey.components, batch, under), FEATURES_SCHEMA)
-    const result = raw ? featuresOf(raw, batch) : { studied: batch.map(bareFeature), missed: batch }
+    const result = featuresOf(raw, batch)
     unstudied.push(...result.missed.map((o) => o.name))
     step(batch.length)
     return { components: [], features: result.studied, discovered: [] }
@@ -289,8 +266,7 @@ async function scan(run: Run, checkout: Checkout, previous: SystemMap | null): P
     summary: survey.summary,
     stack: survey.stack,
     ...drawn,
-    history: [entry, ...(previous?.history ?? [])].slice(0, MAX_HISTORY),
-    model: getSettings().map.model || undefined
+    history: [entry, ...(previous?.history ?? [])].slice(0, MAX_HISTORY)
   }
 }
 
@@ -342,8 +318,7 @@ async function update(run: Run, checkout: Checkout, map: SystemMap): Promise<Sys
       added: patch.added,
       changed: patch.changed,
       removed: patch.removed
-    }),
-    model: getSettings().map.model || map.model
+    })
   }
 }
 
@@ -360,7 +335,7 @@ function describeOutcome(map: SystemMap): string {
   return parts.length ? `Updated from ${plural(last.commitCount, 'commit')}: ${parts.join(', ')}` : `${plural(last.commitCount, 'new commit')}, no change to the map`
 }
 
-function startScan(account: string, repo: string, branch: string, mode: 'scan' | 'update', getWindow: () => BrowserWindow | null): void {
+function startScan(account: string, repo: string, branch: string, mode: 'scan' | 'update'): void {
   const id = mapId(account, repo, branch)
   if (running.has(id)) return
   const chosen = getSettings().map
@@ -408,19 +383,10 @@ function startScan(account: string, repo: string, branch: string, mode: 'scan' |
       checkout?.done()
       running.delete(id)
       emit(run.progress)
-      // In front, the window says so itself; behind, macOS does.
-      const win = getWindow()
-      if (!run.cancelled && (!win || !win.isFocused()) && Notification.isSupported()) {
+      if (!run.cancelled) {
         const failed = run.progress.state === 'error'
-        const note = new Notification({
-          title: failed ? 'System map did not finish' : 'System map ready',
-          body: `${repo.split('/')[1]} · ${branch}\n${failed ? (run.progress.error ?? '') : run.progress.step}`.trim()
-        })
-        note.on('click', () => {
-          win?.show()
-          win?.focus()
-        })
-        note.show()
+        const where = `${repo.split('/')[1]} · ${branch}`
+        notifyMacOS(failed ? 'System map did not finish' : 'System map ready', `${where}\n${failed ? (run.progress.error ?? '') : run.progress.step}`.trim(), account)
       }
     }
   })
@@ -459,14 +425,6 @@ async function freshness(id: string): Promise<MapFreshness> {
   }
 }
 
-const validRepo = (repo: unknown): repo is string => typeof repo === 'string' && /^[\w.-]+\/[\w.-]+$/.test(repo)
-
-/** The account the window names, once gh confirms it is signed in to it. A map is only ever read or scanned as its own account. */
-async function signedIn(account: unknown): Promise<string> {
-  if (typeof account !== 'string' || !(await listAccounts()).some((a) => a.login === account)) throw new Error('Not a signed-in GitHub account.')
-  return account
-}
-
 /** Hooks the system map up to the window. Called once, before the window opens. */
 export function registerSystemMap(getWindow: () => BrowserWindow | null): void {
   emit = (p) => getWindow()?.webContents.send('map:progress', p)
@@ -483,20 +441,18 @@ export function registerSystemMap(getWindow: () => BrowserWindow | null): void {
   ipcMain.handle('map:freshness', (_e, id: string) => (typeof id === 'string' ? freshness(id) : { head: null, behind: null }))
   ipcMain.handle('map:scan', async (_e, account: string, repo: string, branch: string, mode: string) => {
     if (!validRepo(repo) || !validBranch(branch)) throw new Error('Not a branch that can be scanned.')
-    startScan(await signedIn(account), repo, branch, mode === 'update' ? 'update' : 'scan', getWindow)
+    startScan(await signedIn(account), repo, branch, mode === 'update' ? 'update' : 'scan')
   })
   ipcMain.handle('map:cancel', (_e, id: string) => {
     if (typeof id === 'string') cancelScan(id)
   })
   ipcMain.handle('map:delete', (_e, id: string) => {
-    if (typeof id !== 'string' || !(id in all())) return
+    if (typeof id !== 'string' || !maps.has(id)) return
     cancelScan(id)
     const gone = getMap(id)
     // The entry goes; the file stays and the version before this is in the backups.
-    delete all()[id]
-    persist()
+    maps.remove(id)
     // Its checkout goes too, unless another account still has a map of the same branch.
-    const shared = (m: SystemMap | null): boolean => !!m && !!gone && m.repo === gone.repo && m.branch === gone.branch
-    if (gone && !Object.values(all()).map(readable).some(shared)) void dropBranchCheckout(gone.repo, gone.branch)
+    if (gone && !maps.list().some((m) => m.repo === gone.repo && m.branch === gone.branch)) void dropBranchCheckout(gone.repo, gone.branch)
   })
 }

@@ -23,13 +23,20 @@ const MODELS = ['fable', 'opus', 'sonnet', 'haiku']
 /** The radio group cannot hold an empty value, so "use the default" travels under this name. */
 const DEFAULT = '__default__'
 
-const LENGTH_LABEL: Record<ReviewOptions['verbosity'], string> = { brief: 'Brief', normal: 'Normal', detailed: 'Detailed' }
+type Kind = 'review' | 'chat' | 'map'
+/** What each kind of run calls things: its third choice, and the runs it applies to. */
+const KIND: Record<Kind, { lengthTitle: string; runs: string; lengths: Record<ReviewOptions['verbosity'], string> }> = {
+  review: { lengthTitle: 'Review detail', runs: 'reviews', lengths: { brief: 'Brief', normal: 'Normal', detailed: 'Detailed' } },
+  chat: { lengthTitle: 'Answer length', runs: 'questions', lengths: { brief: 'Brief', normal: 'Normal', detailed: 'Detailed' } },
+  // For a scan the same three steps set how many parts each Claude run studies: fewer runs, or a closer look.
+  map: { lengthTitle: 'Scan depth', runs: 'system map scans', lengths: { brief: 'Quick', normal: 'Standard', detailed: 'Thorough' } }
+}
 
 /**
  * One pill that says which Claude runs and how, opening a menu to change it. Reviews and questions
  * keep their own choice; it is saved as it is made, so the next run on any pull request starts from it.
  */
-export function ClaudeOptions({ kind, disabled }: { kind: 'review' | 'chat' | 'map'; disabled?: boolean }) {
+export function ClaudeOptions({ kind, disabled }: { kind: Kind; disabled?: boolean }) {
   const [settings, setSettings] = useState<Settings | null>(null)
   // What "Default" means on this computer, so the option says which model and effort it will be.
   const [defaults, setDefaults] = useState({ model: '', effort: '' })
@@ -38,8 +45,9 @@ export function ClaudeOptions({ kind, disabled }: { kind: 'review' | 'chat' | 'm
     void window.api.reviewDefaults().then(setDefaults, () => undefined)
   }, [])
   if (!settings) return null
-  // Settings saved before this kind existed have no entry for it yet.
-  const options: ReviewOptions = settings[kind] ?? { model: '', effort: '', verbosity: 'normal' }
+  // The main process fills in every kind, also for settings saved before a kind existed.
+  const options = settings[kind]
+  const { lengthTitle, runs, lengths } = KIND[kind]
   const set = (patch: Partial<ReviewOptions>): void => {
     const next = { ...settings, [kind]: { ...options, ...patch } }
     setSettings(next)
@@ -49,12 +57,9 @@ export function ClaudeOptions({ kind, disabled }: { kind: 'review' | 'chat' | 'm
   const models = MODELS.includes(options.model) || !options.model ? MODELS : [...MODELS, options.model]
   const model = options.model ? MODEL_LABEL(options.model) : defaults.model ? MODEL_LABEL(defaults.model) : 'Default model'
   const effort = options.effort || defaults.effort
-  // For a scan the same three steps set how many parts each Claude run studies: fewer runs, or a closer look.
-  const lengthLabel = (v: ReviewOptions['verbosity']): string => (kind === 'map' ? { brief: 'Quick', normal: 'Standard', detailed: 'Thorough' }[v] : LENGTH_LABEL[v])
-  const summary = [model, effort && EFFORT_LABEL(effort), options.verbosity !== 'normal' && lengthLabel(options.verbosity)]
+  const summary = [model, effort && EFFORT_LABEL(effort), options.verbosity !== 'normal' && lengths[options.verbosity]]
     .filter(Boolean)
     .join(' · ')
-  const lengthTitle = kind === 'chat' ? 'Answer length' : kind === 'map' ? 'Scan depth' : 'Review detail'
 
   return (
     <DropdownMenu>
@@ -63,7 +68,7 @@ export function ClaudeOptions({ kind, disabled }: { kind: 'review' | 'chat' | 'm
           variant="secondary"
           size="xs"
           className="h-6 max-w-full min-w-0 rounded-full px-2.5 font-normal text-muted-foreground hover:text-foreground"
-          title={`Model, effort and ${lengthTitle.toLowerCase()} for ${kind === 'chat' ? 'questions' : kind === 'map' ? 'system map scans' : 'reviews'}`}
+          title={`Model, effort and ${lengthTitle.toLowerCase()} for ${runs}`}
         >
           <span className="truncate">{summary}</span>
           <ChevronDown aria-hidden />
@@ -104,7 +109,7 @@ export function ClaudeOptions({ kind, disabled }: { kind: 'review' | 'chat' | 'm
         >
           {VERBOSITIES.map((v) => (
             <DropdownMenuRadioItem key={v} value={v} onSelect={(e) => e.preventDefault()}>
-              {lengthLabel(v)}
+              {lengths[v]}
             </DropdownMenuRadioItem>
           ))}
         </DropdownMenuRadioGroup>

@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { ChevronDown, EyeOff, Keyboard, Video, MessageSquareCheck, NotebookPen, Search, Users, X } from 'lucide-react'
 import type { CiState, Level, PrSummary, ReviewProgress } from '../../shared/types'
 import { cn } from '@/lib/utils'
-import { remember } from './util'
+import { recall, remember } from './util'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
@@ -45,8 +45,8 @@ const keyFor = (account: string): string => `${STORAGE_KEY}.${account}`
  */
 export function loadFilters(account: string, prs: PrSummary[]): Filters {
   try {
-    const own = localStorage.getItem(keyFor(account))
-    const { account: _moved, ...saved } = JSON.parse(own ?? localStorage.getItem(STORAGE_KEY) ?? '{}') as Partial<Filters> & { account?: unknown }
+    const own = recall(keyFor(account))
+    const { account: _moved, ...saved } = JSON.parse(own ?? recall(STORAGE_KEY) ?? '{}') as Partial<Filters> & { account?: unknown }
     const filters = { ...NO_FILTERS, ...saved }
     if (own) return filters
     return {

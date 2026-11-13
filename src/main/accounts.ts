@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process'
 import { run, toolEnv } from './env'
-import { disabledAccounts, noteOriginalAccount, originalAccount, setAccountDisabled } from './settings'
+import { disabledAccounts, LOGIN, noteOriginalAccount, originalAccount, setAccountDisabled } from './settings'
 import type { Account, Owned, PrSummary } from '../shared/types'
 
 /**
@@ -14,8 +14,6 @@ import type { Account, Owned, PrSummary } from '../shared/types'
 
 type Found = Omit<Account, 'enabled'>
 
-// Letters, digits and hyphens; accounts managed by a company also carry an underscore.
-const LOGIN = /^[A-Za-z\d][\w-]{0,60}$/
 /** How long gh's answer about who is signed in is reused. It asks GitHub each time, so not on every refresh. */
 const FRESH_MS = 60_000
 const HOST = 'github.com'
@@ -102,6 +100,12 @@ const withEnabled = (accounts: Found[]): Account[] => {
 }
 
 export const listAccounts = async (force = false): Promise<Account[]> => withEnabled(await ghAccounts(force))
+
+/** The account the window names, once gh confirms it is signed in to it. Everything done per account goes through this. */
+export async function signedIn(account: unknown): Promise<string> {
+  if (typeof account !== 'string' || !(await ghAccounts()).some((a) => a.login === account)) throw new Error('Not a signed-in GitHub account.')
+  return account
+}
 
 /** The account gh uses in a terminal goes first: the dashboard leaves its rows unlabelled and names the others. */
 const activeFirst = (accounts: Account[]): Account[] => [...accounts.filter((a) => a.active), ...accounts.filter((a) => !a.active)]

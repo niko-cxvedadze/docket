@@ -53,10 +53,16 @@ export function notify(kind: NoticeKind, title: string, body: string, account: s
   all.unshift(notice)
   all.splice(MAX_NOTICES)
   persist()
-  const win = getWindow()
-  win?.webContents.send('notice', notice)
-  // In front, the window shows a toast; behind, macOS shows the notification.
-  if (win?.isFocused() || !Notification.isSupported()) return
+  getWindow()?.webContents.send('notice', notice)
+  notifyMacOS(title, body, account, (w) => w.webContents.send('notice:open', notice))
+}
+
+/**
+ * A macOS notification, shown only while the window is behind: in front, the window says so itself.
+ * Clicking it brings the window forward, then runs `onClick`.
+ */
+export function notifyMacOS(title: string, body: string, account: string | undefined, onClick?: (win: BrowserWindow) => void): void {
+  if (getWindow()?.isFocused() || !Notification.isSupported()) return
   // With several accounts, macOS says which one it is about; the window may be showing another.
   const several = (enabledAccountsIfKnown()?.length ?? 1) > 1
   const n = new Notification({ title, body, subtitle: several ? account : undefined })
@@ -66,7 +72,7 @@ export function notify(kind: NoticeKind, title: string, body: string, account: s
     if (w.isMinimized()) w.restore()
     w.show()
     w.focus()
-    w.webContents.send('notice:open', notice)
+    onClick?.(w)
   })
   n.show()
 }

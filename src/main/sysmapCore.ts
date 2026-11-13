@@ -135,7 +135,7 @@ type Raw = Record<string, any> | null | undefined
 
 const text = (v: unknown, max: number): string => (typeof v === 'string' ? v.trim().slice(0, max) : '')
 const arr = (v: unknown): any[] => (Array.isArray(v) ? v : [])
-export const slug = (v: unknown): string =>
+const slug = (v: unknown): string =>
   text(v, 200)
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
@@ -212,8 +212,8 @@ export function surveyOf(raw: Raw): Survey {
 }
 
 /** A component with only what the survey said about it, for when it could not be studied. */
-export const bareComponent = (o: Outline): StudiedComponent => ({ ...o, description: '', tech: '', facts: [], contents: [], files: [], connections: [] })
-export const bareFeature = (o: FeatureOutline): StudiedFeature => ({ ...o, description: '', steps: [], files: [] })
+const bareComponent = (o: Outline): StudiedComponent => ({ ...o, description: '', tech: '', facts: [], contents: [], files: [], connections: [] })
+const bareFeature = (o: FeatureOutline): StudiedFeature => ({ ...o, description: '', steps: [], files: [] })
 
 /** Reads one described component. Fields Claude left empty fall back to what was known before. */
 function componentOf(c: Raw, known: Pick<StudiedComponent, 'id' | 'kind' | 'name' | 'summary' | 'paths'> & Partial<StudiedComponent>): StudiedComponent {
@@ -264,32 +264,29 @@ function answerFor<T extends { id?: unknown; name?: unknown }>(answers: T[], wan
 }
 
 /** The components of one batch as studied, in the order asked, plus parts Claude found missing from the map. */
-export function componentsOf(raw: Raw, asked: Outline[]): { studied: StudiedComponent[]; discovered: Outline[]; missed: Outline[] } {
-  const answers = arr(raw?.components)
-  const missed: Outline[] = []
+/** Each part asked about as Claude described it, in the order asked; one it left out keeps only what was known. */
+function studiedOf<O extends { id: string; name: string }, S>(answers: any[], asked: O[], read: (a: Raw, o: O) => S, bare: (o: O) => S): { studied: S[]; missed: O[] } {
+  const missed: O[] = []
   const studied = asked.map((o) => {
     const a = answerFor(answers, o)
     if (!a) missed.push(o)
-    return a ? componentOf(a, o) : bareComponent(o)
+    return a ? read(a, o) : bare(o)
   })
+  return { studied, missed }
+}
+
+/** The components of one batch as studied, plus parts Claude found missing from the map. With no answer at all, every one is only outlined. */
+export function componentsOf(raw: Raw, asked: Outline[]): { studied: StudiedComponent[]; discovered: Outline[]; missed: Outline[] } {
   const discovered = arr(raw?.discovered)
     .filter((d) => text(d?.name, 1))
     .slice(0, 12)
     .map((d) => outlineOf(d, slug(d.id) || slug(d.name)))
     .filter((d) => d.id)
-  return { studied, discovered, missed }
+  return { ...studiedOf(arr(raw?.components), asked, componentOf, bareComponent), discovered }
 }
 
-export function featuresOf(raw: Raw, asked: FeatureOutline[]): { studied: StudiedFeature[]; missed: FeatureOutline[] } {
-  const answers = arr(raw?.features)
-  const missed: FeatureOutline[] = []
-  const studied = asked.map((o) => {
-    const a = answerFor(answers, o)
-    if (!a) missed.push(o)
-    return a ? featureOf(a, o) : bareFeature(o)
-  })
-  return { studied, missed }
-}
+export const featuresOf = (raw: Raw, asked: FeatureOutline[]): { studied: StudiedFeature[]; missed: FeatureOutline[] } =>
+  studiedOf(arr(raw?.features), asked, featureOf, bareFeature)
 
 /** Resolves what Claude wrote for "which component" to a component that exists: its id, a spelling of it, or its name. */
 function resolver(nodes: { id: string; name: string }[]): (ref: string) => string | null {
@@ -299,7 +296,7 @@ function resolver(nodes: { id: string; name: string }[]): (ref: string) => strin
 }
 
 /** Edges from what each component says it does to others; one per pair, never to itself or to nothing. */
-function edgesOf(components: StudiedComponent[], resolve: (ref: string) => string | null): MapEdge[] {
+function edgesOf(components: { id: string; connections: Connection[] }[], resolve: (ref: string) => string | null): MapEdge[] {
   const edges = new Map<string, MapEdge>()
   for (const c of components)
     for (const k of c.connections) {
@@ -317,7 +314,8 @@ const stepsOn = (steps: MapStep[], resolve: (ref: string) => string | null): Map
     return node ? [{ node, text: s.text }] : []
   })
 
-const KIND_ORDER: Record<MapNodeKind, number> = { entry: 0, service: 1, job: 2, data: 3, external: 4 }
+/** Entry points first, outside services last: the order the lanes are drawn in. */
+const byKind = (a: MapNode, b: MapNode): number => NODE_KINDS.indexOf(a.kind) - NODE_KINDS.indexOf(b.kind)
 
 /** Puts a scan's pieces together: components become nodes, their connections edges, and features are tied to nodes that exist. */
 export function assemble(
@@ -328,7 +326,7 @@ export function assemble(
   const resolve = resolver(components)
   const nodes: MapNode[] = components
     .map(({ connections: _connections, ...n }) => ({ ...n, changedIn: sha }))
-    .sort((a, b) => KIND_ORDER[a.kind] - KIND_ORDER[b.kind])
+    .sort(byKind)
   return {
     nodes,
     edges: edgesOf(components, resolve),
@@ -377,11 +375,11 @@ export function applyPatch(map: SystemMap, raw: Raw, sha: string): Patch {
     if (Array.isArray(c?.connections)) redrawn.set(id, connections)
     ;(before ? changed : added).push({ type: 'node', id, name: node.name })
   }
-  const nodeList = [...nodes.values()].sort((a, b) => KIND_ORDER[a.kind] - KIND_ORDER[b.kind])
+  const nodeList = [...nodes.values()].sort(byKind)
   const resolve = resolver(nodeList)
   const kept = map.edges.filter((e) => !redrawn.has(e.from) && nodes.has(e.from) && nodes.has(e.to))
   const fresh = edgesOf(
-    [...redrawn].map(([id, connections]) => ({ id, connections }) as StudiedComponent),
+    [...redrawn].map(([id, connections]) => ({ id, connections })),
     resolve
   )
 
@@ -448,14 +446,35 @@ export function layoutOf(files: string[], max = 350): string {
   return ''
 }
 
-/** The tracked files under the paths of the parts one pass studies, so it can go straight to reading them. */
-export function filesUnder(files: string[], paths: string[], max = 260): string {
-  const wanted = paths
-    .map((p) => p.split('*')[0].replace(/\/+$/, ''))
-    .filter(Boolean)
-  const found = [...new Set(wanted.flatMap((p) => files.filter((f) => f === p || f.startsWith(`${p}/`))))]
-  if (!found.length) return ''
-  return found.slice(0, max).join('\n') + (found.length > max ? `\n… and ${found.length - max} more` : '')
+/** Where `key` would go in the sorted list. */
+function lowerBound(sorted: string[], key: string): number {
+  let lo = 0
+  let hi = sorted.length
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if (sorted[mid] < key) lo = mid + 1
+    else hi = mid
+  }
+  return lo
+}
+
+/**
+ * The tracked files under the paths of the parts one pass studies, so it can go straight to reading
+ * them. `sorted` is every tracked file in sorted order, so each path is a range found by search.
+ */
+export function filesUnder(sorted: string[], paths: string[], max = 260): string {
+  const found = new Set<string>()
+  let more = 0
+  const take = (f: string): void => {
+    if (found.has(f)) return
+    if (found.size < max) found.add(f)
+    else more++
+  }
+  for (const p of new Set(paths.map((p) => p.split('*')[0].replace(/\/+$/, '')).filter(Boolean))) {
+    if (sorted[lowerBound(sorted, p)] === p) take(p)
+    for (let i = lowerBound(sorted, `${p}/`); i < sorted.length && sorted[i].startsWith(`${p}/`); i++) take(sorted[i])
+  }
+  return [...found].join('\n') + (more ? `\n… and ${more} more` : '')
 }
 
 const listing = (tag: string, text: string, what: string): string => (text ? `\n<${tag}>\n${text}\n</${tag}>\n${what}\n` : '')

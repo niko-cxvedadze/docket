@@ -122,3 +122,33 @@ export function writeStore(name: StoreName, value: unknown, pretty = false): voi
   atomicWrite(dataPath(name), text)
   backUp(name, text)
 }
+
+/**
+ * User data kept as entries by id, each saved and replaced on its own. Entries are read through
+ * `parse`, which fills in what older versions lack; one it cannot read stays in the file untouched.
+ */
+export function keyedStore<T>(name: StoreName, parse: (raw: unknown) => T | null) {
+  let raw: Record<string, unknown> | null = null
+  const parsed = new Map<string, T | null>()
+  const all = (): Record<string, unknown> => (raw ??= readStore<Record<string, unknown>>(name, {}))
+  const get = (id: string): T | null => {
+    if (!parsed.has(id)) parsed.set(id, parse(all()[id]))
+    return parsed.get(id) ?? null
+  }
+  return {
+    get,
+    has: (id: string): boolean => id in all(),
+    list: (): T[] => Object.keys(all()).flatMap((id) => get(id) ?? []),
+    set(id: string, value: T): void {
+      all()[id] = value
+      parsed.set(id, value)
+      writeStore(name, raw)
+    },
+    remove(id: string): void {
+      if (!(id in all())) return
+      delete all()[id]
+      parsed.delete(id)
+      writeStore(name, raw)
+    }
+  }
+}
