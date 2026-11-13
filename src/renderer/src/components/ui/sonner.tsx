@@ -16,10 +16,12 @@ const Toaster = ({ ...props }: ToasterProps) => {
       }}
       style={
         {
-          "--normal-bg": "var(--popover)",
-          "--normal-text": "var(--popover-foreground)",
-          "--normal-border": "var(--border)",
-          "--border-radius": "var(--radius-lg)",
+          // Docket's own palette (styles.css). The shadcn names (--popover, --border) are not defined
+          // as variables here, and a toast pointed at them is drawn with no background at all.
+          "--normal-bg": "var(--panel)",
+          "--normal-text": "var(--ink)",
+          "--normal-border": "var(--line)",
+          "--border-radius": "8px",
         } as React.CSSProperties
       }
       {...props}

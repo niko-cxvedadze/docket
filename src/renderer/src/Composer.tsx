@@ -29,8 +29,8 @@ export function Composer({
   onStop?: () => void
   running: boolean
   placeholder: string
-  /** Shown next to the arrow when it says more than "send", e.g. "Review". */
-  submitLabel?: string
+  /** What the button does, next to its arrow: "Review", "Ask". The same button on both tabs. */
+  submitLabel: string
   /** A review starts without any text; a question needs some. */
   allowEmpty?: boolean
   /** Shortcuts shown over the box. */
@@ -69,13 +69,9 @@ export function Composer({
             <Button size="icon" variant="secondary" className="size-7 shrink-0 rounded-full" aria-label="Stop" title="Stop" onClick={onStop}>
               <Square className="size-3 fill-current" aria-hidden />
             </Button>
-          ) : submitLabel ? (
+          ) : (
             <Button size="xs" className="h-7 shrink-0 rounded-full px-3" disabled={!canSubmit} onClick={onSubmit} title={`${submitLabel} (Enter)`}>
               {submitLabel}
-              <ArrowUp aria-hidden />
-            </Button>
-          ) : (
-            <Button size="icon" className="size-7 shrink-0 rounded-full" aria-label="Send" title="Send (Enter)" disabled={!canSubmit} onClick={onSubmit}>
               <ArrowUp aria-hidden />
             </Button>
           )}

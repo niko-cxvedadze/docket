@@ -1,24 +1,45 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { FolderOpen, RefreshCw } from 'lucide-react'
-import type { StorageItem, StorageUsage } from '../../shared/types'
+import type { PrSummary, StorageItem, StorageUsage } from '../../shared/types'
 import { Button } from '@/components/ui/button'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { ago, cleanError } from './util'
+import { ago, cleanError, VIEWED_PREFIX } from './util'
 import { toast } from 'sonner'
 
-// Files marked as viewed are kept in the window's localStorage, one entry per pull request ever opened.
-const VIEWED_PREFIX = 'docket.viewed.'
+// Files marked as viewed are kept in the window's localStorage, one entry per pull request ever opened (see viewedKey).
 const VIEWED_ID = 'local:viewed'
 
-function viewedItem(): StorageItem {
-  let count = 0
-  let bytes = 0
+/** Which account's pull requests are whose, to tell marks made before accounts were kept apart. */
+interface Owners {
+  account: string
+  /** Every account's pull requests. */
+  prs: PrSummary[]
+  /** The account that owns what no list shows any more: the first one. */
+  first: string
+}
+
+/**
+ * The storage keys holding one account's marks. A mark is saved as "<account>|<pull request>".
+ * One from before accounts were kept apart names only the pull request: it is the account's that
+ * lists that pull request, or the first account's when none does.
+ */
+function viewedKeys({ account, prs, first }: Owners): string[] {
+  const keys: string[] = []
   for (let i = 0; i < localStorage.length; i++) {
     const key = localStorage.key(i)
     if (!key?.startsWith(VIEWED_PREFIX)) continue
-    count++
-    bytes += (key.length + (localStorage.getItem(key)?.length ?? 0)) * 2 // stored as UTF-16
+    const name = key.slice(VIEWED_PREFIX.length)
+    const cut = name.indexOf('|')
+    const owner = cut >= 0 ? name.slice(0, cut) : (prs.find((p) => p.key === name)?.account ?? first)
+    if (owner === account) keys.push(key)
   }
+  return keys
+}
+
+function viewedItem(owners: Owners): StorageItem {
+  const keys = viewedKeys(owners)
+  const count = keys.length
+  const bytes = keys.reduce((n, key) => n + (key.length + (localStorage.getItem(key)?.length ?? 0)) * 2, 0) // stored as UTF-16
   return {
     id: VIEWED_ID,
     group: 'data',
@@ -29,14 +50,7 @@ function viewedItem(): StorageItem {
   }
 }
 
-function clearViewed(): void {
-  const keys: string[] = []
-  for (let i = 0; i < localStorage.length; i++) {
-    const key = localStorage.key(i)
-    if (key?.startsWith(VIEWED_PREFIX)) keys.push(key)
-  }
-  keys.forEach((k) => localStorage.removeItem(k))
-}
+const clearViewed = (owners: Owners): void => viewedKeys(owners).forEach((k) => localStorage.removeItem(k))
 
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`
@@ -143,7 +157,21 @@ function Section({
   )
 }
 
-export function Storage({ onChanged }: { onChanged: () => void }) {
+/** What one account keeps on this computer, and below it what every account shares. */
+export function Storage({
+  account,
+  prs,
+  first,
+  onChanged
+}: {
+  account: string
+  /** Every account's pull requests, to tell whose the older viewed marks are. */
+  prs: PrSummary[]
+  first: string
+  onChanged: () => void
+}) {
+  const owners = useRef<Owners>({ account, prs, first })
+  owners.current = { account, prs, first }
   const [usage, setUsage] = useState<StorageUsage | null>(null)
   const [loading, setLoading] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
@@ -152,20 +180,21 @@ export function Storage({ onChanged }: { onChanged: () => void }) {
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const u = await window.api.storageUsage()
-      const viewed = viewedItem()
+      const u = await window.api.storageUsage(account)
+      const viewed = viewedItem(owners.current)
       // localStorage lives inside Electron's own files, so take it out of that row rather than count it twice.
       const items = u.items.map((i) => (i.id === 'other' ? { ...i, bytes: Math.max(0, i.bytes - viewed.bytes) } : i))
       const at = items.findIndex((i) => i.group === 'app')
       items.splice(at < 0 ? items.length : at, 0, viewed)
-      setUsage({ ...u, items })
+      // The headline is the account's own; what every account shares is totalled in its section.
+      setUsage({ ...u, total: items.reduce((n, i) => n + (i.group === 'app' ? 0 : i.bytes), 0), items })
       setError(null)
     } catch (e) {
       setError(cleanError(e))
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [account])
 
   useEffect(() => void load(), [load])
 
@@ -173,8 +202,8 @@ export function Storage({ onChanged }: { onChanged: () => void }) {
     setBusy(item.id)
     setError(null)
     try {
-      if (item.id === VIEWED_ID) clearViewed()
-      else await window.api.clearStorage(item.id)
+      if (item.id === VIEWED_ID) clearViewed(owners.current)
+      else await window.api.clearStorage(account, item.id)
       toast.success(`Cleared ${item.label.toLowerCase()}`, { description: `Freed ${formatBytes(item.bytes)}.` })
       if (item.id.startsWith('drafts:')) onChanged()
     } catch (e) {
@@ -206,7 +235,9 @@ export function Storage({ onChanged }: { onChanged: () => void }) {
             Storage <span className="ml-2 text-base font-normal text-muted-foreground tabular-nums">{formatBytes(usage.total)}</span>
           </h1>
           <p className="mt-1 max-w-[75ch] text-sm text-muted-foreground">
-            Everything Docket keeps on this computer, in <span className="font-mono text-xs">{usage.path}</span>.
+            What Docket keeps on this computer for <span className="font-medium text-foreground">{account}</span>, in{' '}
+            <span className="font-mono text-xs">{usage.path}</span>. Other accounts have their own, and clearing here
+            never touches theirs.
           </p>
         </div>
         <div className="flex gap-2">
@@ -235,7 +266,13 @@ export function Storage({ onChanged }: { onChanged: () => void }) {
           repos
         />
         <Section title="Docket data" items={of('data')} busy={busy} onClear={(i) => void clear(i)} />
-        <Section title="App data" items={of('app')} busy={busy} onClear={(i) => void clear(i)} />
+        <Section
+          title="Shared by every account"
+          note="Not tied to an account: the settings file, and what Electron and its browser engine keep for the app itself."
+          items={of('app')}
+          busy={busy}
+          onClear={(i) => void clear(i)}
+        />
       </div>
     </main>
   )

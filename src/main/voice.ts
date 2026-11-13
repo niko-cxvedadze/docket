@@ -2,6 +2,7 @@ import { app } from 'electron'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import type { ChildProcess } from 'node:child_process'
+import { shared } from './env'
 import { myReviewComments } from './github'
 import { runClaude } from './review'
 
@@ -39,12 +40,12 @@ ${samples.map((s) => `<comment>\n${s}\n</comment>`).join('\n')}
 </comments>`
 }
 
-let learning: Promise<{ guide: string; samples: number }> | null = null
+const learning = new Map<string, Promise<{ guide: string; samples: number }>>()
 
-/** Drafts a voice guide from whoever is signed in to gh, so it works for any user without configuration. */
-export function learnVoice(): Promise<{ guide: string; samples: number }> {
-  learning ??= (async () => {
-    const samples = await myReviewComments()
+/** Drafts one account's voice guide from the review comments that account wrote on GitHub. */
+export function learnVoice(account: string): Promise<{ guide: string; samples: number }> {
+  return shared(learning, account, async () => {
+    const samples = await myReviewComments(account)
     if (samples.length < MIN_SAMPLES)
       throw new Error(
         `Found only ${samples.length} review ${samples.length === 1 ? 'comment' : 'comments'} of yours on GitHub, which is too few to learn from. Describe your voice by hand instead.`
@@ -60,6 +61,5 @@ export function learnVoice(): Promise<{ guide: string; samples: number }> {
     } finally {
       clearTimeout(timer)
     }
-  })().finally(() => (learning = null))
-  return learning
+  })
 }

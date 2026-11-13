@@ -1,3 +1,5 @@
+import type { SystemMapApi } from './sysmap'
+
 export type Level = 'action' | 'ready' | 'waiting'
 export type Role = 'mine' | 'review'
 export type CiState = 'success' | 'failure' | 'pending' | 'none'
@@ -50,6 +52,11 @@ export interface PrSummary {
   headSha: string
   baseRef: string
   headRef: string
+  /**
+   * The signed-in GitHub account this pull request was found with. Everything Docket does to it
+   * (reading it, re-running checks, posting a review) is done as that account.
+   */
+  account: string
   role: Role
   ci: CiState
   failingChecks: FailingCheck[]
@@ -92,12 +99,37 @@ export interface MergedStackPr {
   headRef: string
 }
 
+/**
+ * Names one account's copy of a pull request. Two accounts can each list the same one, so its key
+ * alone is not enough. Drafts are stored under this, so the format must not change.
+ */
+export const prId = (account: string, key: string): string => `${account} ${key}`
+
+/** A pull request as it is named in passing: "docket#12", without the owner. */
+export const shortName = (pr: { repo: string; number: number }): string => `${pr.repo.split('/')[1]}#${pr.number}`
+
 export interface PrList {
-  viewer: string
+  /** The GitHub accounts the list covers. The first is the one gh uses in a terminal, when that one is switched on. */
+  accounts: string[]
   fetchedAt: string
+  /**
+   * Every account's pull requests. The accounts are kept apart: a pull request two of them have
+   * to do with is here once for each, and the window only ever shows one account's.
+   */
   prs: PrSummary[]
-  /** Set when GitHub could not be reached and this is the last list that was fetched. */
+  /** Set when GitHub could not be reached, for every account or for one, and what is shown is older. */
   notice?: string
+}
+
+/** A GitHub account the gh CLI is signed in to on this computer. */
+export interface Account {
+  login: string
+  /** The account gh itself uses in a terminal. Docket does not depend on it and never changes it. */
+  active: boolean
+  /** Whether Docket shows this account's pull requests. On unless switched off here. */
+  enabled: boolean
+  /** Set when gh says its sign-in for this account no longer works. */
+  problem?: string
 }
 
 export interface PrFile {
@@ -117,6 +149,15 @@ export interface ExistingComment {
   side: 'LEFT' | 'RIGHT'
   /** Line it was written on, kept so an outdated comment can still say where it was. */
   originalLine: number | null
+  /** First line of a comment on several lines, now and when it was written. Null for a comment on one line. */
+  startLine: number | null
+  originalStartLine: number | null
+  /** The diff the comment was written on, from the hunk header down to the commented line. */
+  diffHunk: string
+  /** The review it was submitted with. */
+  reviewId: number | null
+  /** The code under the thread has changed since it was written. */
+  outdated: boolean
   author: string
   avatarUrl: string
   body: string
@@ -132,13 +173,54 @@ export interface ExistingComment {
   resolvedBy: string | null
 }
 
+/** One commit on the pull request's branch. */
+export interface PrCommit {
+  sha: string
+  /** First line of the commit message. */
+  message: string
+  /** GitHub login, or the name in the commit when it is not tied to an account. */
+  author: string
+  avatarUrl: string
+  committedAt: string
+  url: string
+}
+
+/** A comment on the pull request as a whole, not on a line of the diff. */
+export interface PrComment {
+  id: number
+  author: string
+  avatarUrl: string
+  body: string
+  /** The comment as GitHub renders it; see PrDetail.bodyHtml. */
+  bodyHtml: string
+  createdAt: string
+  url: string
+}
+
+/** A submitted review: its verdict and summary. Its line comments are in PrDetail.comments, linked by reviewId. */
+export interface PrReview {
+  id: number
+  author: string
+  avatarUrl: string
+  state: 'approved' | 'changes_requested' | 'commented' | 'dismissed'
+  body: string
+  bodyHtml: string
+  submittedAt: string
+  url: string
+}
+
 export interface PrDetail {
   body: string
   /** The description as GitHub renders it, with signed links to attached images and videos that expire after a few minutes. */
   bodyHtml: string
   headSha: string
   files: PrFile[]
+  /** Comments on lines of the diff. */
   comments: ExistingComment[]
+  commits: PrCommit[]
+  /** Comments on the pull request as a whole. */
+  conversation: PrComment[]
+  reviews: PrReview[]
   truncated: boolean
 }
 
@@ -156,7 +238,13 @@ export interface DraftComment {
   source: 'ai' | 'me'
 }
 
-export interface ReviewDraft {
+/** Something saved for one GitHub account: a draft, a posted review, a conversation, a notification. */
+export interface Owned {
+  /** The GitHub account it belongs to. Absent on what was saved before accounts were kept apart. */
+  account?: string
+}
+
+export interface ReviewDraft extends Owned {
   key: string
   headSha: string
   createdAt: string
@@ -172,12 +260,16 @@ export interface ReviewDraft {
 
 export interface ReviewProgress {
   key: string
+  /** The account the review is drafted for. */
+  account?: string
   state: 'running' | 'done' | 'error' | 'cancelled'
   step: string
   error?: string
 }
 
 export interface PostRequest {
+  /** The account to post as: the one the pull request is listed for. */
+  account?: string
   repo: string
   number: number
   headSha: string
@@ -187,7 +279,7 @@ export interface PostRequest {
 }
 
 /** A review as it was posted to GitHub, kept for the Review tab's history whatever happens to the draft. */
-export interface PostedReview {
+export interface PostedReview extends Owned {
   id: string
   /** The pull request it was posted on. */
   key: string
@@ -237,8 +329,20 @@ export interface CommitMade {
 }
 
 /** What the dashboard looked like on one day, recorded locally. */
-export interface Snapshot {
+export interface Snapshot extends SnapshotCounts {
   date: string // YYYY-MM-DD, local time
+}
+
+/**
+ * One day as it is stored: each account's counts. A day recorded before accounts were kept apart
+ * has the counts at the top level instead; they belong to the account gh was using then.
+ */
+export interface StoredSnapshot extends Partial<SnapshotCounts> {
+  date: string
+  byAccount?: Record<string, SnapshotCounts>
+}
+
+export interface SnapshotCounts {
   blocked: number
   ready: number
   reviewQueue: number
@@ -293,6 +397,18 @@ export interface Settings {
   review: ReviewOptions
   /** The same choices for questions about a pull request; verbosity sets how long answers are. */
   chat: ReviewOptions
+  /** The same choices for scanning a system map; verbosity sets how deep a scan goes. Opus at medium effort unless changed. */
+  map: ReviewOptions
+  /**
+   * `disabled`: GitHub accounts switched off in Docket. `original`: the account gh was using when
+   * accounts were first kept apart; everything saved before that is its. Neither is changed by saveSettings.
+   */
+  accounts: { disabled: string[]; original?: string }
+  /**
+   * Each account's own voice, by login. An account without one yet starts from `voice`, the guide
+   * from before accounts were kept apart, and gets its own the first time it is saved.
+   */
+  voices: Record<string, VoiceSettings>
 }
 
 export interface ChatMessage {
@@ -305,7 +421,7 @@ export interface ChatMessage {
 }
 
 /** A conversation with Claude about one pull request. */
-export interface Chat {
+export interface Chat extends Owned {
   id: string
   /** The pull request it is about. */
   key: string
@@ -325,6 +441,7 @@ export interface Chat {
 /** Progress of an answer: the text so far while it streams, then how it ended. */
 export interface ChatEvent {
   key: string
+  account?: string
   chatId: string
   state: 'running' | 'done' | 'error' | 'cancelled'
   step?: string
@@ -345,7 +462,7 @@ export type NoticeKind =
   | 'ready'
 
 /** Something Docket told the user about, kept for the bell's list. */
-export interface Notice {
+export interface Notice extends Owned {
   id: string
   at: string
   kind: NoticeKind
@@ -364,6 +481,7 @@ export type Theme = 'system' | 'light' | 'dark'
 export interface StorageItem {
   /** What clearStorage takes: "repo:<dir>", "drafts:open", "drafts:posted", "history", "snapshots", "cache", ... */
   id: string
+  /** 'app' is what every account shares; the rest is the one account's. */
   group: 'repos' | 'data' | 'app'
   label: string
   detail: string
@@ -376,56 +494,67 @@ export interface StorageItem {
 export interface StorageUsage {
   /** The app's data folder. */
   path: string
+  /** The account's own data. What every account shares is listed too, but not counted here. */
   total: number
   items: StorageItem[]
 }
 
-export interface Api {
+/** Everything the window can ask of the main process. The system map's part is in sysmap.ts. */
+export interface Api extends SystemMapApi {
   getSettings(): Promise<Settings>
   /** What the claude CLI uses when no model or effort is chosen, read from the user's Claude Code settings. Empty when unknown. */
   reviewDefaults(): Promise<{ model: string; effort: string }>
   saveSettings(settings: Settings): Promise<Settings>
-  /** Drafts a voice guide from the signed-in user's recent review comments. Does not save it. */
-  learnVoice(): Promise<{ guide: string; samples: number }>
-  performance(force: boolean): Promise<Performance>
+  /** The GitHub accounts gh is signed in to. `force` asks gh again instead of using what it said a moment ago. */
+  listAccounts(force?: boolean): Promise<Account[]>
+  /** Show or hide one account's pull requests. Resolves with the accounts as they are now. */
+  setAccountEnabled(login: string, enabled: boolean): Promise<Account[]>
+  /** Drafts a voice guide from one account's recent review comments. Does not save it. */
+  learnVoice(account: string): Promise<{ guide: string; samples: number }>
+  /** One account's history. */
+  performance(account: string, force: boolean): Promise<Performance>
   /** The dashboard list. Reuses a recent result unless `force` is set (the Refresh button). */
   listPrs(force?: boolean): Promise<PrList>
-  /** Every open pull request by other people in these repositories. */
-  listOpenPrs(repos: string[]): Promise<{ prs: PrSummary[]; truncated: boolean }>
-  prDetail(repo: string, number: number): Promise<PrDetail>
-  checkLog(repo: string, jobId: number): Promise<CheckLog>
+  /** Every open pull request by other people in these repositories, as one account sees them. */
+  listOpenPrs(account: string, repos: string[]): Promise<{ prs: PrSummary[]; truncated: boolean }>
+  // What follows names a pull request by the account it is listed for, since two accounts can each list the same one.
+  prDetail(account: string, repo: string, number: number): Promise<PrDetail>
+  checkLog(account: string, repo: string, jobId: number): Promise<CheckLog>
   /** Re-run one failed GitHub Actions job. */
-  rerunJob(repo: string, jobId: number): Promise<void>
+  rerunJob(account: string, repo: string, jobId: number): Promise<void>
   /** Re-run the failed jobs of these GitHub Actions workflow runs. */
-  rerunFailedJobs(repo: string, runIds: number[]): Promise<void>
-  getDraft(key: string): Promise<ReviewDraft | null>
+  rerunFailedJobs(account: string, repo: string, runIds: number[]): Promise<void>
+  getDraft(account: string, key: string): Promise<ReviewDraft | null>
   saveDraft(draft: ReviewDraft): Promise<void>
   /** `why` is logged, so a draft that goes missing can be traced. */
-  discardDraft(key: string, why: string): Promise<void>
+  discardDraft(account: string, key: string, why: string): Promise<void>
   /** Reviews posted on a pull request, newest first. */
-  listReviews(key: string): Promise<PostedReview[]>
+  listReviews(account: string, key: string): Promise<PostedReview[]>
   /** `extend` keeps the current draft and adds only what it does not already have. Replaces by default. */
   startReview(pr: PrSummary, focus: string, mode?: 'replace' | 'extend'): Promise<void>
-  cancelReview(key: string): Promise<void>
+  cancelReview(account: string, key: string): Promise<void>
   runningReviews(): Promise<ReviewProgress[]>
   postReview(req: PostRequest): Promise<{ url: string }>
   /** Put text on the clipboard, optionally with a rich (HTML) version for apps that accept it. */
   copyText(text: string, html?: string): Promise<void>
   openExternal(url: string): Promise<void>
-  storageUsage(): Promise<StorageUsage>
-  clearStorage(id: string): Promise<void>
+  /** What one account keeps on this computer, and what every account shares. */
+  storageUsage(account: string): Promise<StorageUsage>
+  /** Clears one item: of that account only, unless the item is shared. */
+  clearStorage(account: string, id: string): Promise<void>
   /** Open the app's data folder in Finder. */
   revealStorage(): Promise<void>
   onReviewProgress(cb: (p: ReviewProgress) => void): () => void
   /** The conversations about a pull request, most recent first, and which of them Claude is answering in. */
-  listChats(key: string): Promise<{ chats: Chat[]; running: string[] }>
+  listChats(account: string, key: string): Promise<{ chats: Chat[]; running: string[] }>
   /** Asks in conversation `chatId`, or starts a new one when it is null. Resolves with the conversation's id. */
   sendChat(pr: PrSummary, chatId: string | null, question: string): Promise<string | null>
   cancelChat(chatId: string): Promise<void>
   deleteChat(chatId: string): Promise<void>
   onChatEvent(cb: (e: ChatEvent) => void): () => void
-  listNotices(): Promise<Notice[]>
-  markNoticesRead(): Promise<void>
+  /** One account's notifications, newest first. */
+  listNotices(account: string): Promise<Notice[]>
+  markNoticesRead(account: string): Promise<void>
   /** A new notice, for the toast and the bell. */
   onNotice(cb: (n: Notice) => void): () => void
   /** The user clicked a macOS notification: open what it is about. */

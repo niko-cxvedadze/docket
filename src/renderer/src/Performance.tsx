@@ -164,7 +164,8 @@ const queueConfig = {
   blocked: { label: 'Your PRs blocked on you', color: 'var(--series-2)' }
 } satisfies ChartConfig
 
-export function Performance() {
+/** One account's history. The page is made anew when the account changes, so nothing of another's lingers. */
+export function Performance({ account }: { account: string }) {
   const [data, setData] = useState<Data | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
@@ -174,21 +175,21 @@ export function Performance() {
   const load = useCallback(async (force: boolean) => {
     setLoading(true)
     try {
-      setData(await window.api.performance(force))
+      setData(await window.api.performance(account, force))
       setError(null)
     } catch (e) {
       setError(cleanError(e))
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [account])
   useEffect(() => void load(false), [load])
   // While older months are still being fetched in the background, pick up what has arrived.
   useEffect(() => {
     if (!data?.partial) return
-    const t = setInterval(() => void window.api.performance(false).then(setData, () => undefined), 20_000)
+    const t = setInterval(() => void window.api.performance(account, false).then(setData, () => undefined), 20_000)
     return () => clearInterval(t)
-  }, [data?.partial])
+  }, [account, data?.partial])
 
   const repos = useMemo(() => {
     if (!data) return []

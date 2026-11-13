@@ -7,10 +7,11 @@ import { join } from 'node:path'
 import { toolEnv } from './env'
 import { describeBase, prCheckout, type Checkout } from './repo'
 import { prDetail, prDiff } from './github'
+import { accountFor, adoptOld, ownerOf } from './accounts'
 import { describeTool } from './review'
 import { getSettings } from './settings'
 import { notify } from './notify'
-import type { Chat, ChatEvent, ChatMessage, ExistingComment, PrDetail, PrSummary, Verbosity } from '../shared/types'
+import { shortName, type Chat, type ChatEvent, type ChatMessage, type ExistingComment, type PrDetail, type PrSummary, type Verbosity } from '../shared/types'
 
 // ---------- Saved conversations ----------
 
@@ -34,6 +35,7 @@ function load(): Record<string, Chat> {
     chats[id] = {
       id,
       key: c.key ?? k,
+      account: c.account,
       title: c.title ?? titleOf(c.messages.find((m) => m.role === 'user')?.text ?? 'Conversation'),
       createdAt: c.createdAt ?? first?.at ?? new Date().toISOString(),
       updatedAt: c.updatedAt ?? c.messages[c.messages.length - 1]?.at ?? new Date().toISOString(),
@@ -48,11 +50,16 @@ function load(): Record<string, Chat> {
 
 const persist = (): void => writeStore('chats.json', chats)
 
-/** The conversations about one pull request, the most recently used first. */
-export const listChats = (key: string): Chat[] =>
+/** One account's conversations about a pull request, the most recently used first. */
+export const listChats = (account: string, key: string): Chat[] =>
   Object.values(load())
-    .filter((c) => c.key === key)
+    .filter((c) => c.key === key && ownerOf(c) === account)
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+
+/** Marks conversations from before accounts were kept apart with the account whose list now shows their pull request. */
+export function adoptOldChats(listed: Map<string, string>): void {
+  if (adoptOld(Object.values(load()), listed)) persist()
+}
 
 export function deleteChat(id: string): void {
   cancelChat(id)
@@ -60,15 +67,20 @@ export function deleteChat(id: string): void {
   persist()
 }
 
-/** Every saved conversation, for the storage page. */
-export function chatStats(): { count: number; bytes: number } {
-  const all = load()
-  return { count: Object.keys(all).length, bytes: Buffer.byteLength(JSON.stringify(all)) }
+/** One account's saved conversations, for the storage page. */
+export function chatStats(account: string): { count: number; bytes: number } {
+  const theirs = Object.values(load()).filter((c) => ownerOf(c) === account)
+  return { count: theirs.length, bytes: theirs.length ? Buffer.byteLength(JSON.stringify(theirs)) : 0 }
 }
 
-export function clearChats(): void {
-  for (const id of running.keys()) cancelChat(id)
-  chats = {}
+/** Removes one account's conversations. Other accounts' conversations are not touched. */
+export function clearChats(account: string): void {
+  const all = load()
+  for (const c of Object.values(all)) {
+    if (ownerOf(c) !== account) continue
+    cancelChat(c.id)
+    delete all[c.id]
+  }
   persist()
 }
 
@@ -141,7 +153,7 @@ const LENGTH: Record<Verbosity, string> = {
   detailed:
     'Answer in detail: explain the reasoning, point at the relevant code as path:line, include short excerpts where they help, and mention edge cases and trade-offs.'
 }
-const withLength = (prompt: string): string => {
+export const withLength = (prompt: string): string => {
   const style = LENGTH[getSettings().chat.verbosity]
   return style ? `${prompt}\n\n<answer_length>${style}</answer_length>` : prompt
 }
@@ -160,9 +172,10 @@ export function cancelChat(id: string): void {
   r.child?.kill('SIGTERM')
 }
 
-function ask(
+export function ask(
   prompt: string,
-  chat: Chat,
+  /** The claude session to start or continue, and the folder it runs in. */
+  chat: Pick<Chat, 'sessionId' | 'cwd'>,
   resume: boolean,
   hasCode: boolean,
   entry: { child?: ChildProcess; cancelled: boolean },
@@ -276,6 +289,7 @@ export function sendChat(pr: PrSummary, chatId: string | null, question: string,
   const chat: Chat = existing ?? {
     id: randomUUID(),
     key,
+    account: typeof pr.account === 'string' ? pr.account : undefined,
     title: titleOf(text),
     createdAt: now,
     updatedAt: now,
@@ -295,7 +309,9 @@ export function sendChat(pr: PrSummary, chatId: string | null, question: string,
 
   let partial = ''
   let step = 'Thinking'
-  const send = (e: Partial<ChatEvent>): void => emit({ key, chatId: id, state: 'running', step, partial, ...e })
+  const owner = chat.account
+  const about = { key, account: owner, chatId: id }
+  const send = (e: Partial<ChatEvent>): void => emit({ ...about, state: 'running', step, partial, ...e })
   const onStep = (s: string): void => {
     step = s
     send({})
@@ -308,9 +324,10 @@ export function sendChat(pr: PrSummary, chatId: string | null, question: string,
       // A conversation Claude never answered has no session to resume yet.
       let started = !!existing && existing.messages.some((m) => m.role === 'assistant' && !m.error)
       onStep('Checking for new commits')
-      const detail = await prDetail(pr.repo, pr.number)
+      const account = await accountFor(pr.repo, pr.number, chat.account ?? pr.account)
+      const detail = await prDetail(account, pr.repo, pr.number)
       // Every question checks the head GitHub reports now, so Claude never reads outdated code.
-      checkout = await prCheckout(pr, detail.headSha, onStep)
+      checkout = await prCheckout(pr, account, detail.headSha, onStep)
       const cwd = checkout?.dir ?? emptyDir()
       // A session resumes only in the folder it started in. If that changed (the code became
       // reachable, or was not this time), start a fresh session with the full context.
@@ -321,7 +338,7 @@ export function sendChat(pr: PrSummary, chatId: string | null, question: string,
       const hasCode = !!checkout
       const moved = started && chat.headSha !== detail.headSha
       if (entry.cancelled) throw new Error('cancelled')
-      const diff = !started || moved ? await prDiff(pr.repo, pr.number) : ''
+      const diff = !started || moved ? await prDiff(account, pr.repo, pr.number) : ''
       const base = describeBase(checkout?.base ?? null)
       const prompt = !started
         ? firstPrompt(pr, detail, diff, hasCode, base, text)
@@ -340,16 +357,16 @@ export function sendChat(pr: PrSummary, chatId: string | null, question: string,
       chat.messages.push(message('assistant', answer))
       chat.updatedAt = new Date().toISOString()
       persist()
-      emit({ key, chatId: id, state: 'done' })
-      notify('chat-done', 'Claude answered', `${pr.repo.split('/')[1]}#${pr.number}: ${chat.title}`, key, pr.url)
+      emit({ ...about, state: 'done' })
+      notify('chat-done', 'Claude answered', `${shortName(pr)}: ${chat.title}`, owner, key, pr.url)
     } catch (e) {
       const cancelled = entry.cancelled
       const error = cancelled ? 'Stopped.' : (e as Error).message
       chat.messages.push(message('assistant', partial.trim(), error))
       chat.updatedAt = new Date().toISOString()
       persist()
-      emit({ key, chatId: id, state: cancelled ? 'cancelled' : 'error', error })
-      if (!cancelled) notify('chat-failed', 'Claude could not answer', `${pr.repo.split('/')[1]}#${pr.number}: ${error}`, key, pr.url)
+      emit({ ...about, state: cancelled ? 'cancelled' : 'error', error })
+      if (!cancelled) notify('chat-failed', 'Claude could not answer', `${shortName(pr)}: ${error}`, owner, key, pr.url)
     } finally {
       checkout?.done()
       running.delete(id)

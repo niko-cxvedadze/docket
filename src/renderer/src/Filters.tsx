@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { ChevronDown, EyeOff, Keyboard, Video, MessageSquareCheck, NotebookPen, Search, Users, X } from 'lucide-react'
 import type { CiState, Level, PrSummary, ReviewProgress } from '../../shared/types'
 import { cn } from '@/lib/utils'
+import { remember } from './util'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
@@ -33,23 +34,32 @@ export interface Filters {
 
 export const NO_FILTERS: Filters = { query: '', repo: '', level: 'all', ci: 'all', authors: [], hideDrafts: false, drafting: false, reviewed: false, media: false }
 
+// Each account has its own filters: a repository or an author picked in one means nothing in another.
 const STORAGE_KEY = 'docket.filters'
+const keyFor = (account: string): string => `${STORAGE_KEY}.${account}`
 
-export function loadFilters(): Filters {
+/**
+ * The account's remembered filters. An account that has none yet starts from the ones saved before
+ * accounts were kept apart, minus the repository and the authors when they are not among its own
+ * pull requests (`prs`): those were chosen for another account and would hide everything here.
+ */
+export function loadFilters(account: string, prs: PrSummary[]): Filters {
   try {
-    return { ...NO_FILTERS, ...(JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}') as Partial<Filters>) }
+    const own = localStorage.getItem(keyFor(account))
+    const { account: _moved, ...saved } = JSON.parse(own ?? localStorage.getItem(STORAGE_KEY) ?? '{}') as Partial<Filters> & { account?: unknown }
+    const filters = { ...NO_FILTERS, ...saved }
+    if (own) return filters
+    return {
+      ...filters,
+      repo: prs.some((p) => p.repo === filters.repo) ? filters.repo : '',
+      authors: filters.authors.filter((login) => prs.some((p) => p.author.login === login))
+    }
   } catch {
     return NO_FILTERS
   }
 }
 
-export function saveFilters(f: Filters): void {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(f))
-  } catch {
-    /* filters just will not be remembered */
-  }
-}
+export const saveFilters = (account: string, f: Filters): void => remember(keyFor(account), JSON.stringify(f))
 
 export const isFiltering = (f: Filters): boolean =>
   !!f.query.trim() || !!f.repo || f.level !== 'all' || f.ci !== 'all' || f.authors.length > 0 || f.hideDrafts || f.drafting || f.reviewed || f.media
@@ -202,7 +212,7 @@ function Chip({
           )}
         >
           <Icon aria-hidden />
-          <span className="@max-6xl:sr-only">{children}</span>
+          <span className="@max-7xl:sr-only">{children}</span>
           {count !== undefined && (
             <span
               className={cn(
@@ -329,7 +339,7 @@ export function FilterBar({
       </div>
 
       {/* Second row: narrowing dropdowns on the left, one-click toggles next, the tally on the right.
-          It stays on one line: below @6xl the chips show only their icon and count, and the dropdowns truncate. */}
+          It stays on one line: below @7xl the chips show only their icon and count, and the dropdowns truncate. */}
       <div className="flex flex-nowrap items-center gap-2">
         <Select value={filters.ci} onValueChange={(v) => set({ ci: v as Filters['ci'] })}>
           <SelectTrigger
@@ -429,7 +439,7 @@ export function FilterBar({
                   onClick={() => onChange(NO_FILTERS)}
                 >
                   <X aria-hidden />
-                  <span className="@max-6xl:sr-only">Clear filters</span>
+                  <span className="@max-7xl:sr-only">Clear filters</span>
                 </Button>
               </>
             ) : (

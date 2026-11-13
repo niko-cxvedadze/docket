@@ -12,9 +12,9 @@ import {
   DropdownMenuTrigger
 } from '@/components/ui/dropdown-menu'
 
-const EFFORT_LABEL = (e: string): string => (e === 'xhigh' ? 'Extra high' : e.charAt(0).toUpperCase() + e.slice(1))
+export const EFFORT_LABEL = (e: string): string => (e === 'xhigh' ? 'Extra high' : e.charAt(0).toUpperCase() + e.slice(1))
 /** "claude-opus-5-5" and "opus" both read as "Opus". */
-const MODEL_LABEL = (m: string): string => {
+export const MODEL_LABEL = (m: string): string => {
   const known = ['fable', 'opus', 'sonnet', 'haiku'].find((name) => m.toLowerCase().includes(name))
   return known ? known.charAt(0).toUpperCase() + known.slice(1) : m
 }
@@ -29,7 +29,7 @@ const LENGTH_LABEL: Record<ReviewOptions['verbosity'], string> = { brief: 'Brief
  * One pill that says which Claude runs and how, opening a menu to change it. Reviews and questions
  * keep their own choice; it is saved as it is made, so the next run on any pull request starts from it.
  */
-export function ClaudeOptions({ kind, disabled }: { kind: 'review' | 'chat'; disabled?: boolean }) {
+export function ClaudeOptions({ kind, disabled }: { kind: 'review' | 'chat' | 'map'; disabled?: boolean }) {
   const [settings, setSettings] = useState<Settings | null>(null)
   // What "Default" means on this computer, so the option says which model and effort it will be.
   const [defaults, setDefaults] = useState({ model: '', effort: '' })
@@ -49,10 +49,12 @@ export function ClaudeOptions({ kind, disabled }: { kind: 'review' | 'chat'; dis
   const models = MODELS.includes(options.model) || !options.model ? MODELS : [...MODELS, options.model]
   const model = options.model ? MODEL_LABEL(options.model) : defaults.model ? MODEL_LABEL(defaults.model) : 'Default model'
   const effort = options.effort || defaults.effort
-  const summary = [model, effort && EFFORT_LABEL(effort), options.verbosity !== 'normal' && LENGTH_LABEL[options.verbosity]]
+  // For a scan the same three steps set how many parts each Claude run studies: fewer runs, or a closer look.
+  const lengthLabel = (v: ReviewOptions['verbosity']): string => (kind === 'map' ? { brief: 'Quick', normal: 'Standard', detailed: 'Thorough' }[v] : LENGTH_LABEL[v])
+  const summary = [model, effort && EFFORT_LABEL(effort), options.verbosity !== 'normal' && lengthLabel(options.verbosity)]
     .filter(Boolean)
     .join(' · ')
-  const lengthTitle = kind === 'chat' ? 'Answer length' : 'Review detail'
+  const lengthTitle = kind === 'chat' ? 'Answer length' : kind === 'map' ? 'Scan depth' : 'Review detail'
 
   return (
     <DropdownMenu>
@@ -61,7 +63,7 @@ export function ClaudeOptions({ kind, disabled }: { kind: 'review' | 'chat'; dis
           variant="secondary"
           size="xs"
           className="h-6 max-w-full min-w-0 rounded-full px-2.5 font-normal text-muted-foreground hover:text-foreground"
-          title={`Model, effort and ${lengthTitle.toLowerCase()} for ${kind === 'chat' ? 'questions' : 'reviews'}`}
+          title={`Model, effort and ${lengthTitle.toLowerCase()} for ${kind === 'chat' ? 'questions' : kind === 'map' ? 'system map scans' : 'reviews'}`}
         >
           <span className="truncate">{summary}</span>
           <ChevronDown aria-hidden />
@@ -102,7 +104,7 @@ export function ClaudeOptions({ kind, disabled }: { kind: 'review' | 'chat'; dis
         >
           {VERBOSITIES.map((v) => (
             <DropdownMenuRadioItem key={v} value={v} onSelect={(e) => e.preventDefault()}>
-              {LENGTH_LABEL[v]}
+              {lengthLabel(v)}
             </DropdownMenuRadioItem>
           ))}
         </DropdownMenuRadioGroup>

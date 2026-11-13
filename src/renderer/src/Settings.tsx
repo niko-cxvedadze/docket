@@ -25,7 +25,8 @@ Examples
 - "can we move this into the service? the router is getting heavy"
 - "nit: naming, this reads like a boolean"`
 
-export function Settings() {
+/** One account's reviewer voice. Each account has its own; the page is made anew when the account changes. */
+export function Settings({ account }: { account: string }) {
   const [saved, setSaved] = useState<SettingsData | null>(null)
   const [draft, setDraft] = useState<SettingsData | null>(null)
   const [learning, setLearning] = useState(false)
@@ -45,11 +46,12 @@ export function Settings() {
   if (!draft || !saved)
     return <main className="flex-1 px-7 pt-5 text-muted-foreground">{error ?? 'Loading settings…'}</main>
 
-  const voice = draft.voice
+  // Until the account has a voice of its own it shows the one from before accounts were kept apart; saving makes it its own.
+  const voice = draft.voices[account] ?? draft.voice
   const dirty = JSON.stringify(draft) !== JSON.stringify(saved)
   const setVoice = (patch: Partial<SettingsData['voice']>): void => {
     setNote(null)
-    setDraft({ ...draft, voice: { ...voice, ...patch } })
+    setDraft({ ...draft, voices: { ...draft.voices, [account]: { ...voice, ...patch } } })
   }
 
   const save = async (): Promise<void> => {
@@ -58,7 +60,7 @@ export function Settings() {
       setSaved(s)
       setDraft(s)
       setError(null)
-      setNote('Saved. Reviews you start from now on use it.')
+      setNote(`Saved. Reviews ${account} starts from now on use it.`)
     } catch (e) {
       setError(cleanError(e))
     }
@@ -69,9 +71,16 @@ export function Settings() {
     setError(null)
     setNote(null)
     try {
-      const { guide, samples } = await window.api.learnVoice()
-      setDraft((d) =>
-        d && { ...d, voice: { ...d.voice, guide, enabled: true, learnedAt: new Date().toISOString(), learnedFrom: samples } }
+      const { guide, samples } = await window.api.learnVoice(account)
+      setDraft(
+        (d) =>
+          d && {
+            ...d,
+            voices: {
+              ...d.voices,
+              [account]: { ...(d.voices[account] ?? d.voice), guide, enabled: true, learnedAt: new Date().toISOString(), learnedFrom: samples }
+            }
+          }
       )
       setNote(`Drafted from ${samples} of your review comments. Read it over, edit what is off, then save.`)
     } catch (e) {
@@ -87,8 +96,9 @@ export function Settings() {
         <div className="mr-auto min-w-0">
           <h1 className="text-xl font-semibold tracking-tight">Reviewer voice</h1>
           <p className="mt-1 max-w-[75ch] text-sm text-muted-foreground">
-            Claude drafts review comments in the voice described here, so they read like you wrote them. The voice
-            changes wording only, never what gets flagged.
+            Claude drafts review comments for <span className="font-medium text-foreground">{account}</span> in the
+            voice described here, so they read like you wrote them. The voice changes wording only, never what gets
+            flagged. Each account has its own.
           </p>
         </div>
         <Label className="gap-2 text-sm font-medium">
@@ -126,8 +136,7 @@ export function Settings() {
             {learning ? 'Reading your comments…' : 'Learn from my GitHub comments'}
           </Button>
           <span className="text-xs text-muted-foreground">
-            Reads recent review comments from the GitHub account signed in on this computer and writes the guide for
-            you. {voice.guide.trim() ? 'This replaces the text below.' : ''}
+            Reads the review comments {account} wrote on GitHub recently and writes the guide for you. {voice.guide.trim() ? 'This replaces the text below.' : ''}
           </span>
         </div>
 

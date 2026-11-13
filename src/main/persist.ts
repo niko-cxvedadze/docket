@@ -19,7 +19,7 @@ import { join } from 'node:path'
  * ever means data was lost, which is why it is safe to restore one.
  */
 
-export type StoreName = 'drafts.json' | 'reviews.json' | 'chats.json' | 'settings.json' | 'theme.json' | 'snapshots.json'
+export type StoreName = 'drafts.json' | 'reviews.json' | 'chats.json' | 'settings.json' | 'theme.json' | 'snapshots.json' | 'sysmaps.json' | 'sysmap-chats.json'
 
 /** Every recent version is kept; older ones thin out to one per hour. */
 const KEEP_RECENT = 50

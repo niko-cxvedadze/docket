@@ -6,10 +6,10 @@ import { randomUUID } from 'node:crypto'
 import { toolEnv } from './env'
 import { describeBase, prCheckout, type Checkout } from './repo'
 import { prDetail, prDiff } from './github'
+import { accountFor } from './accounts'
 import { getDraft, saveDraft } from './store'
-import { getSettings } from './settings'
-import type { Verbosity } from '../shared/types'
-import type { PrSummary, ReviewDraft, ReviewProgress, Severity, SummaryLength, Verdict } from '../shared/types'
+import { getSettings, voiceFor } from './settings'
+import { prId, type PrSummary, type ReviewDraft, type ReviewProgress, type Severity, type SummaryLength, type Verbosity, type Verdict } from '../shared/types'
 
 const SCHEMA = {
   type: 'object',
@@ -160,8 +160,9 @@ let queue: Promise<void> = Promise.resolve()
 
 export const runningReviews = (): ReviewProgress[] => [...running.values()].map((r) => r.progress)
 
-export function cancelReview(key: string): void {
-  const r = running.get(key)
+// Two accounts can each review the same pull request, so a run is named by both (prId).
+export function cancelReview(account: string, key: string): void {
+  const r = running.get(prId(account, key))
   if (!r) return
   r.cancelled = true
   r.child?.kill('SIGTERM')
@@ -263,14 +264,15 @@ const VERDICTS: Verdict[] = ['approve', 'comment', 'request_changes']
 
 /** `extend` keeps the current draft and adds what Claude finds that it does not already have. */
 export function startReview(pr: PrSummary, focus: string, emit: (p: ReviewProgress) => void, mode: 'replace' | 'extend' = 'replace'): void {
-  if (running.has(pr.key)) return
-  const entry = {
-    cancelled: false,
-    progress: { key: pr.key, state: 'running', step: 'Waiting for another review to finish' } as ReviewProgress
-  }
-  running.set(pr.key, entry)
+  // The review is drafted for the account the pull request is listed for, and filed under it.
+  const owner = typeof pr.account === 'string' ? pr.account : ''
+  const id = prId(owner, pr.key)
+  if (running.has(id)) return
+  const progress = (state: ReviewProgress['state'], step: string): ReviewProgress => ({ key: pr.key, account: owner, state, step })
+  const entry = { cancelled: false, progress: progress('running', 'Waiting for another review to finish') }
+  running.set(id, entry)
   const step = (s: string): void => {
-    entry.progress = { key: pr.key, state: 'running', step: s }
+    entry.progress = progress('running', s)
     emit(entry.progress)
   }
   emit(entry.progress)
@@ -281,16 +283,18 @@ export function startReview(pr: PrSummary, focus: string, emit: (p: ReviewProgre
     try {
       if (entry.cancelled) throw new Error('cancelled')
       step('Loading the pull request')
-      const [detail, diff] = await Promise.all([prDetail(pr.repo, pr.number), prDiff(pr.repo, pr.number)])
+      const account = await accountFor(pr.repo, pr.number, owner)
+      const [detail, diff] = await Promise.all([prDetail(account, pr.repo, pr.number), prDiff(account, pr.repo, pr.number)])
       // Checked against the head GitHub reports right now, and fetched again if it moved.
-      checkout = await prCheckout(pr, detail.headSha, step)
+      checkout = await prCheckout(pr, account, detail.headSha, step)
       const dir = checkout?.dir ?? null
       if (entry.cancelled) throw new Error('cancelled')
       step(dir ? 'Claude is reading the changes' : 'Claude is reading the diff (repository checkout unavailable)')
       const fallbackDir = join(app.getPath('userData'), 'empty')
       mkdirSync(fallbackDir, { recursive: true })
-      const { voice, review } = getSettings()
-      const base = mode === 'extend' ? getDraft(pr.key) : null
+      const { review } = getSettings()
+      const voice = voiceFor(account)
+      const base = mode === 'extend' ? getDraft(account, pr.key) : null
       if (base && base.headSha !== detail.headSha)
         throw new Error('The draft is behind new commits, so its comments point at old lines. Replace it instead.')
       const raw = await runClaude(
@@ -304,6 +308,7 @@ export function startReview(pr: PrSummary, focus: string, emit: (p: ReviewProgre
       )
       const draft: ReviewDraft = {
         key: pr.key,
+        account,
         headSha: detail.headSha,
         createdAt: new Date().toISOString(),
         summary: raw.summary ?? '',
@@ -330,28 +335,26 @@ export function startReview(pr: PrSummary, focus: string, emit: (p: ReviewProgre
           }))
       }
       // Read again now: the reviewer may have edited the draft while Claude was running.
-      const current = mode === 'extend' ? getDraft(pr.key) : null
+      const current = mode === 'extend' ? getDraft(account, pr.key) : null
       if (current && !current.posted && current.headSha === draft.headSha) {
         const have = new Set(current.comments.map((c) => `${c.path}:${c.line}:${c.title.trim().toLowerCase()}`))
         const added = draft.comments.filter((c) => !have.has(`${c.path}:${c.line}:${c.title.trim().toLowerCase()}`))
         saveDraft({ ...current, summary: current.summary.trim() ? current.summary : draft.summary, comments: [...current.comments, ...added] })
-        entry.progress = {
-          key: pr.key,
-          state: 'done',
-          step: added.length ? `Added ${added.length} ${added.length === 1 ? 'comment' : 'comments'} to the draft` : 'Nothing new to add'
-        }
+        entry.progress = progress(
+          'done',
+          added.length ? `Added ${added.length} ${added.length === 1 ? 'comment' : 'comments'} to the draft` : 'Nothing new to add'
+        )
       } else {
         saveDraft(draft)
-        entry.progress = { key: pr.key, state: 'done', step: 'Review drafted' }
+        entry.progress = progress('done', 'Review drafted')
       }
     } catch (e) {
-      const message = (e as Error).message
       entry.progress = entry.cancelled
-        ? { key: pr.key, state: 'cancelled', step: 'Review cancelled' }
-        : { key: pr.key, state: 'error', step: 'Review failed', error: message }
+        ? progress('cancelled', 'Review cancelled')
+        : { ...progress('error', 'Review failed'), error: (e as Error).message }
     } finally {
       checkout?.done()
-      running.delete(pr.key)
+      running.delete(id)
       emit(entry.progress)
     }
   })

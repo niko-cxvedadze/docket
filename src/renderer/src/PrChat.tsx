@@ -47,6 +47,11 @@ const SHORTCUTS: Shortcut[] = [
 ]
 
 /** Conversations with Claude about this pull request: the current one, and earlier ones in the history. */
+/** What the user asked, set to the right like a message they sent. */
+export function Asked({ children }: { children: string }) {
+  return <div className="ml-8 justify-self-end rounded-lg bg-tint px-3 py-2 whitespace-pre-wrap break-words">{children}</div>
+}
+
 export function PrChat({ pr }: { pr: PrSummary }) {
   const [chats, setChats] = useState<Chat[]>([])
   // undefined until the history has loaded; null means a new conversation not asked yet.
@@ -60,7 +65,7 @@ export function PrChat({ pr }: { pr: PrSummary }) {
 
   const reload = useCallback(
     () =>
-      window.api.listChats(pr.key).then(
+      window.api.listChats(pr.account, pr.key).then(
         (r) => {
           setChats(r.chats)
           setPending(null)
@@ -81,7 +86,8 @@ export function PrChat({ pr }: { pr: PrSummary }) {
   }, [reload])
   useEffect(() => {
     const off = window.api.onChatEvent((e) => {
-      if (e.key !== pr.key) return
+      // The same pull request under another account has conversations of its own.
+      if (e.key !== pr.key || (e.account && e.account !== pr.account)) return
       if (e.state === 'running') setLive((l) => ({ ...l, [e.chatId]: e }))
       else {
         setLive((l) => {
@@ -200,9 +206,7 @@ export function PrChat({ pr }: { pr: PrSummary }) {
         <div className="grid gap-4">
           {messages.map((m) =>
             m.role === 'user' ? (
-              <div key={m.id} className="ml-8 justify-self-end rounded-lg bg-tint px-3 py-2 whitespace-pre-wrap break-words">
-                {m.text}
-              </div>
+              <Asked key={m.id}>{m.text}</Asked>
             ) : (
               <div key={m.id} className="grid gap-1.5">
                 {m.text && <Markdown text={m.text} />}
@@ -211,7 +215,7 @@ export function PrChat({ pr }: { pr: PrSummary }) {
             )
           )}
           {pending && !messages.some((m) => m.role === 'user' && m.text === pending && m === messages[messages.length - 1]) && (
-            <div className="ml-8 justify-self-end rounded-lg bg-tint px-3 py-2 whitespace-pre-wrap break-words">{pending}</div>
+            <Asked>{pending}</Asked>
           )}
           {running && (
             <div className="grid gap-1.5">
@@ -234,6 +238,7 @@ export function PrChat({ pr }: { pr: PrSummary }) {
         onSubmit={() => send(draft)}
         onStop={() => currentId && void window.api.cancelChat(currentId)}
         running={running}
+        submitLabel="Ask"
         placeholder={running ? 'Claude is answering…' : 'Ask about this pull request'}
         above={<Shortcuts items={SHORTCUTS} disabled={running} onPick={(s) => send(s.prompt)} />}
       />

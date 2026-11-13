@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { toast } from 'sonner'
-import type { Level, MergedStackPr, PrList, PrSummary, ReviewProgress } from '../../shared/types'
+import { shortName, type Level, type MergedStackPr, type PrList, type PrSummary, type ReviewProgress } from '../../shared/types'
 import { Badge } from '@/components/ui/badge'
 import { Card } from '@/components/ui/card'
 import { cn } from '@/lib/utils'
-import { ago } from './util'
+import { ago, cleanError, isCopyKey, recall, recallJson, remember, toggled } from './util'
+import { SelectionBar } from './SelectionBar'
 import { ExternalLink, GitBranch, GitMerge, Image as ImageIcon, Layers, Link2, LoaderCircle, Pin, Video, type LucideIcon } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -14,10 +15,12 @@ import { StatusIcons } from './StatusIcons'
 import { Author } from './Author'
 import { groupStacks, type Group } from './stacks'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { cleanError } from './util'
 import { applyFilters, FilterBar, isFiltering, loadFilters, saveFilters } from './Filters'
 
 interface Props {
+  /** The account being shown. Its filters, and which review list it was on, are remembered apart from other accounts'. */
+  account: string
+  /** That account's pull requests. */
   list: PrList
   progress: Record<string, ReviewProgress>
   onOpen: (pr: PrSummary) => void
@@ -254,7 +257,7 @@ function Row({
             )}
             {pr.role === 'review' && <Author author={pr.author} className="shrink-0 self-center" />}
             <span className="shrink-0 font-mono" title={`${pr.repo}#${pr.number}`}>
-              {pr.repo.split('/')[1]}#{pr.number}
+              {shortName(pr)}
             </span>
             <span className="shrink-0">{ago(pr.updatedAt)}</span>
             <span className="shrink-0">
@@ -329,7 +332,8 @@ function Column({
   onPin,
   onCopy,
   hiddenNeeds = 0,
-  loading
+  loading,
+  footer
 }: {
   pins: Set<string>
   onPin: (pr: PrSummary) => void
@@ -348,6 +352,8 @@ function Column({
   hiddenNeeds?: number
   /** More pull requests are on their way: say so, and hold their place with placeholder rows. */
   loading?: string
+  /** A note under the list, scrolled with it. */
+  footer?: React.ReactNode
 }) {
   const needs = prs.filter((p) => p.level !== 'waiting')
   // Stacked pull requests are kept together; a stack sits with whichever of its members is most urgent.
@@ -408,8 +414,9 @@ function Column({
     </ul>
   )
   return (
-    <section className="min-w-0">
-      <h2 className="mb-3 flex min-h-9 items-center gap-2.5 text-xl font-semibold tracking-tight">
+    // Side by side, each list scrolls on its own under its heading; stacked in a narrow window, the page scrolls as one.
+    <section className="flex min-w-0 flex-col min-[1050px]:min-h-0">
+      <h2 className="mb-3 flex min-h-9 shrink-0 items-center gap-2.5 text-xl font-semibold tracking-tight">
         {title}
         <Badge variant="secondary" className={cn('rounded-full', needs.length > 0 && 'bg-action-bg text-action')}>
           {needs.length ? `${needs.length} need you` : 'nothing needs you'}
@@ -427,6 +434,8 @@ function Column({
         )}
         {controls && <span className="ml-auto text-sm font-normal tracking-normal">{controls}</span>}
       </h2>
+      {/* A little wider and taller than the rows, so a focused row's ring is not cut off at the edges. */}
+      <div className="-mx-1 -mt-1 px-1 pt-1 pb-10 min-[1050px]:min-h-0 min-[1050px]:flex-1 min-[1050px]:overflow-y-auto">
       {prs.length === 0 && !loading && <p className="rounded-md border border-dashed px-4 py-6 text-center text-sm text-muted-foreground">{emptyText}</p>}
       {pinned.length > 0 && (
         <div className="mb-5">
@@ -445,44 +454,39 @@ function Column({
         </>
       )}
       {loading && <RowSkeletons />}
+      {footer}
+      </div>
     </section>
   )
 }
 
 const PINS_KEY = 'docket.pins'
-const loadPins = (): Set<string> => {
-  try {
-    return new Set(JSON.parse(localStorage.getItem(PINS_KEY) ?? '[]') as string[])
-  } catch {
-    return new Set()
-  }
-}
+const loadPins = (): Set<string> => new Set(recallJson<string[]>(PINS_KEY, []))
 
 type Scope = 'mine' | 'all'
 const SCOPE_KEY = 'docket-review-scope'
 const OPEN_STALE_MS = 5 * 60_000
-// Kept outside the component so coming back from a pull request does not refetch.
+// Kept outside the component so coming back from a pull request does not refetch. It is one
+// account's answer, so it is only used again for that account.
 let openCache: { repos: string; at: number; prs: PrSummary[]; truncated: boolean } | null = null
 
-/** Every open pull request in the repositories you work in, fetched only while "All open" is selected. */
-function useOpenPrs(list: PrList, enabled: boolean) {
+/** Every open pull request in the repositories the account works in, fetched only while "All open" is selected. */
+function useOpenPrs(account: string, list: PrList, enabled: boolean) {
   const repos = useMemo(() => [...new Set(list.prs.map((p) => p.repo))].sort(), [list.prs])
-  const [state, setState] = useState<{ prs: PrSummary[]; truncated: boolean; loading: boolean; error: string | null }>({
-    prs: openCache?.prs ?? [],
-    truncated: openCache?.truncated ?? false,
-    loading: false,
-    error: null
+  const [state, setState] = useState<{ prs: PrSummary[]; truncated: boolean; loading: boolean; error: string | null }>(() => {
+    const kept = openCache?.repos.startsWith(`${account}|`) ? openCache : null
+    return { prs: kept?.prs ?? [], truncated: kept?.truncated ?? false, loading: false, error: null }
   })
   useEffect(() => {
     if (!enabled || !repos.length) return
-    const key = repos.join(',')
+    const key = `${account}|${repos.join(',')}`
     // The main process keeps the list from GitHub for a few minutes and marks drafts on every answer,
     // so asking again is cheap. Asking after every dashboard refresh (which follows a finished review,
     // a post or a discard) keeps "Review drafts" right for pull requests that are only in this list.
     const fresh = openCache?.repos === key && Date.now() - openCache.at < OPEN_STALE_MS
     let cancelled = false
     if (!fresh) setState((s) => ({ ...s, loading: true, error: null }))
-    window.api.listOpenPrs(repos).then(
+    window.api.listOpenPrs(account, repos).then(
       (r) => {
         openCache = { repos: key, at: fresh ? openCache!.at : Date.now(), ...r }
         if (!cancelled) setState({ ...r, loading: false, error: null })
@@ -493,27 +497,21 @@ function useOpenPrs(list: PrList, enabled: boolean) {
       cancelled = true
     }
     // list: a new object after every dashboard refresh, even one answered from the cache.
-  }, [enabled, repos, list])
+  }, [account, enabled, repos, list])
   return state
 }
 
-export function Dashboard({ list, progress, onOpen }: Props) {
+export function Dashboard({ account, list, progress, onOpen }: Props) {
   // After each refresh, quietly load the pages of the few pull requests most likely to be opened next.
   useEffect(() => {
     const t = setTimeout(() => preloadTop(list.prs), 1500)
     return () => clearTimeout(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [list.fetchedAt])
-  const [scope, setScope] = useState<Scope>(() => {
-    try {
-      return localStorage.getItem(SCOPE_KEY) === 'all' ? 'all' : 'mine'
-    } catch {
-      return 'mine'
-    }
-  })
-  const open = useOpenPrs(list, scope === 'all')
-  const [filters, setFilters] = useState(loadFilters)
-  useEffect(() => saveFilters(filters), [filters])
+  const [scope, setScope] = useState<Scope>(() => (recall(`${SCOPE_KEY}.${account}`, SCOPE_KEY) === 'all' ? 'all' : 'mine'))
+  const open = useOpenPrs(account, list, scope === 'all')
+  const [filters, setFilters] = useState(() => loadFilters(account, list.prs))
+  useEffect(() => saveFilters(account, filters), [account, filters])
 
   // "All open" adds everyone else's open pull requests to the review column; the ones that
   // involve you keep the fuller status from the main list.
@@ -537,13 +535,8 @@ export function Dashboard({ list, progress, onOpen }: Props) {
   const [pins, setPins] = useState(loadPins)
   const togglePin = useCallback((pr: PrSummary) => {
     setPins((prev) => {
-      const next = new Set(prev)
-      if (!next.delete(pr.key)) next.add(pr.key)
-      try {
-        localStorage.setItem(PINS_KEY, JSON.stringify([...next]))
-      } catch {
-        /* pinned for this session only */
-      }
+      const next = toggled(prev, pr.key)
+      remember(PINS_KEY, JSON.stringify([...next]))
       return next
     })
   }, [])
@@ -576,13 +569,7 @@ export function Dashboard({ list, progress, onOpen }: Props) {
       (e) => toast.error('Could not copy', { description: cleanError(e) })
     )
   }, [])
-  const toggle = useCallback((pr: PrSummary) => {
-    setSelection((prev) => {
-      const next = new Set(prev)
-      if (!next.delete(pr.key)) next.add(pr.key)
-      return next
-    })
-  }, [])
+  const toggle = useCallback((pr: PrSummary) => setSelection((prev) => toggled(prev, pr.key)), [])
   const selectedPrs = useMemo(() => prs.filter((p) => selection.has(p.key)), [prs, selection])
   // The stack each pull request belongs to, worked out per column the same way the columns draw them.
   const stackOf = useMemo(() => {
@@ -597,11 +584,8 @@ export function Dashboard({ list, progress, onOpen }: Props) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
       if (e.key === 'Escape' && selection.size) return setSelection(new Set())
-      if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== 'c') return
-      const el = document.activeElement
-      if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) return
-      if (window.getSelection()?.toString()) return // let ordinary text copying through
-      const focused = el?.closest<HTMLElement>('[data-pr-key]')?.dataset.prKey
+      if (!isCopyKey(e)) return
+      const focused = document.activeElement?.closest<HTMLElement>('[data-pr-key]')?.dataset.prKey
       if (e.shiftKey) {
         const key = focused ?? selectedPrs[0]?.key
         const stack = key ? stackOf.get(key) : undefined
@@ -625,19 +609,15 @@ export function Dashboard({ list, progress, onOpen }: Props) {
   const changeScope = (next: string): void => {
     const value: Scope = next === 'all' ? 'all' : 'mine'
     setScope(value)
-    try {
-      localStorage.setItem(SCOPE_KEY, value)
-    } catch {
-      /* remembered for this session only */
-    }
+    remember(`${SCOPE_KEY}.${account}`, value)
   }
   return (
-    <main className="flex-1 overflow-x-hidden overflow-y-auto px-7 pb-10">
-      {/* Stays at the top while the lists scroll underneath; opaque so rows do not show through. */}
-      <div className="sticky top-0 z-10 -mx-7 border-b border-border/60 bg-background px-7 pt-3 pb-3 shadow-[0_6px_10px_-8px_rgb(0_0_0/0.15)] dark:shadow-[0_6px_10px_-8px_rgb(0_0_0/0.6)]">
+    <main className="flex min-h-0 flex-1 flex-col overflow-hidden px-7">
+      {/* Stays at the top while the lists scroll underneath. */}
+      <div className="z-10 -mx-7 shrink-0 border-b border-border/60 bg-background px-7 pt-3 pb-3 shadow-[0_6px_10px_-8px_rgb(0_0_0/0.15)] dark:shadow-[0_6px_10px_-8px_rgb(0_0_0/0.6)]">
         <FilterBar prs={source} filters={filters} progress={progress} shown={prs.length} onChange={setFilters} />
       </div>
-      <div className="mt-4 grid grid-cols-1 gap-7 min-[1050px]:grid-cols-2">
+      <div className="grid min-h-0 flex-1 grid-cols-1 gap-x-7 overflow-y-auto pt-4 min-[1050px]:grid-cols-2 min-[1050px]:grid-rows-[minmax(0,1fr)] min-[1050px]:overflow-hidden">
         <Column
           title="Your pull requests"
           prs={prs.filter((p) => p.role === 'mine')}
@@ -651,7 +631,6 @@ export function Dashboard({ list, progress, onOpen }: Props) {
           onPin={togglePin}
           onCopy={copy}
         />
-        <div className="min-w-0">
           <Column
             title="Pull requests to review"
             prs={prs.filter((p) => p.role === 'review')}
@@ -680,32 +659,28 @@ export function Dashboard({ list, progress, onOpen }: Props) {
             pins={pins}
             onPin={togglePin}
             onCopy={copy}
+            footer={
+              scope === 'all' && (
+                <div className="mt-3 text-xs text-muted-foreground">
+                  {open.error && <p className="text-danger">Could not load all open pull requests. {open.error}</p>}
+                  {open.truncated && !open.loading && (
+                    <p>Showing the {open.prs.length} most recently updated. Older open pull requests are on GitHub.</p>
+                  )}
+                </div>
+              )
+            }
           />
-          {scope === 'all' && (
-            <div className="mt-3 text-xs text-muted-foreground">
-              {open.error && <p className="text-danger">Could not load all open pull requests. {open.error}</p>}
-              {open.truncated && !open.loading && (
-                <p>Showing the {open.prs.length} most recently updated. Older open pull requests are on GitHub.</p>
-              )}
-            </div>
-          )}
-        </div>
       </div>
 
       {selectedPrs.length > 0 && (
-        <div className="pointer-events-none fixed inset-x-0 bottom-5 z-20 flex justify-center">
-          <div className="pointer-events-auto flex items-center gap-2 rounded-lg border bg-card px-3 py-2 text-sm shadow-lg" role="status">
-            <span className="font-medium tabular-nums">{selectedPrs.length} selected</span>
-            <Button size="sm" className="h-7 gap-1" onClick={() => copy(selectedPrs, 'selection')}>
-              <Link2 aria-hidden />
-              Copy links
-              <kbd className="ml-1 text-[11px] opacity-70">⌘C</kbd>
-            </Button>
-            <Button size="sm" variant="ghost" className="h-7" onClick={() => setSelection(new Set())}>
-              Clear
-            </Button>
-          </div>
-        </div>
+        <SelectionBar
+          className="fixed"
+          count={selectedPrs.length}
+          label="Copy links"
+          icon={Link2}
+          onCopy={() => copy(selectedPrs, 'selection')}
+          onClear={() => setSelection(new Set())}
+        />
       )}
     </main>
   )

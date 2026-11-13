@@ -1,11 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import type { PrList, PrSummary, ReviewProgress } from '../../shared/types'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { prId, type PrList, type PrSummary, type ReviewProgress } from '../../shared/types'
 import { Dashboard } from './Dashboard'
 import { Notices } from './Notices'
+import { AccountRail, loadScope, saveScope } from './Accounts'
 import { PrView } from './PrView'
 import { Performance } from './Performance'
 import { Settings } from './Settings'
 import { Storage } from './Storage'
+import { MapScanNotices, SystemMap } from './SystemMap'
 import { ago } from './util'
 import {
   ChartLine,
@@ -15,6 +17,7 @@ import {
   MessageSquareQuote,
   Monitor,
   Moon,
+  Network,
   RefreshCw,
   Sun
 } from 'lucide-react'
@@ -26,6 +29,8 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 
 const REFRESH_MS = 120_000
+
+const runOf = (p: ReviewProgress): string => prId(p.account ?? '', p.key)
 
 const THEME_CHOICES: { value: Theme; label: string; Icon: typeof Sun }[] = [
   { value: 'system', label: 'Match macOS', Icon: Monitor },
@@ -68,7 +73,7 @@ function ThemeSwitch() {
 }
 
 /** The number on the dock icon, with where it comes from. */
-function NeedsYou({ prs, onShow }: { prs: PrSummary[]; onShow: () => void }) {
+function NeedsYou({ prs, account, onShow }: { prs: PrSummary[]; /** The account on screen, when there are others besides it. */ account: string | null; onShow: () => void }) {
   const needs = prs.filter((p) => p.level !== 'waiting')
   if (!needs.length) return null
   const mine = needs.filter((p) => p.role === 'mine')
@@ -85,7 +90,10 @@ function NeedsYou({ prs, onShow }: { prs: PrSummary[]; onShow: () => void }) {
           <button onClick={onShow}>{needs.length} need you</button>
         </Badge>
       </TooltipTrigger>
-      <TooltipContent>{parts.join(', ')}. This is the number on the dock icon.</TooltipContent>
+      <TooltipContent>
+        {parts.join(', ')}
+        {account ? `, for ${account}. The dock icon counts every account.` : '. This is the number on the dock icon.'}
+      </TooltipContent>
     </Tooltip>
   )
 }
@@ -132,11 +140,13 @@ export function App() {
   const [selected, setSelected] = useState<string | null>(null)
   // A pull request opened from "All open" is not in the main list, so keep what was clicked.
   const [opened, setOpened] = useState<PrSummary | null>(null)
-  const [page, setPage] = useState<'dashboard' | 'performance' | 'settings' | 'storage'>('dashboard')
-  const [progress, setProgress] = useState<Record<string, ReviewProgress>>({})
+  const [page, setPage] = useState<'dashboard' | 'map' | 'performance' | 'settings' | 'storage'>('dashboard')
+  const [allProgress, setAllProgress] = useState<Record<string, ReviewProgress>>({})
   const busy = useRef(false)
   const again = useRef<{ force: boolean } | null>(null)
   const [fullScreen, setFullScreen] = useState(false)
+  // The account last chosen in the bar on the left. There is always exactly one on screen.
+  const [savedScope, setSavedScope] = useState(loadScope)
   useClock()
   useEffect(() => {
     void window.api.isFullScreen().then(setFullScreen)
@@ -183,14 +193,42 @@ export function App() {
   }, [refresh])
 
   useEffect(() => {
-    void window.api.runningReviews().then((rs) => setProgress(Object.fromEntries(rs.map((r) => [r.key, r]))))
+    // Two accounts can each review the same pull request, so a run is kept under both names.
+    void window.api.runningReviews().then((rs) => setAllProgress(Object.fromEntries(rs.map((r) => [runOf(r), r]))))
     return window.api.onReviewProgress((p) => {
-      setProgress((prev) => ({ ...prev, [p.key]: p }))
+      setAllProgress((prev) => ({ ...prev, [runOf(p)]: p }))
       if (p.state !== 'running') void refresh()
     })
   }, [refresh])
 
-  const pr = selected ? (list?.prs.find((p) => p.key === selected) ?? (opened?.key === selected ? opened : undefined)) : undefined
+  // The account on screen: the one last chosen, or the first when that one was hidden or signed out since.
+  const scope = !list ? null : savedScope && list.accounts.includes(savedScope) ? savedScope : (list.accounts[0] ?? null)
+  const pickScope = useCallback((account: string) => {
+    setSavedScope(account)
+    saveScope(account)
+  }, [])
+  const changeScope = useCallback((account: string) => {
+    pickScope(account)
+    // Like switching workspace: back to that account's own pages, not a pull request of another.
+    setSelected(null)
+  }, [pickScope])
+  // Everything below sees only this account: its pull requests and its running reviews.
+  const shown = useMemo<PrList | null>(
+    () => (list && scope ? { ...list, accounts: [scope], prs: list.prs.filter((p) => p.account === scope) } : null),
+    [list, scope]
+  )
+  const progress = useMemo(
+    () => Object.fromEntries(Object.values(allProgress).filter((p) => !p.account || p.account === scope).map((p) => [p.key, p])),
+    [allProgress, scope]
+  )
+
+  const pr = selected ? (shown?.prs.find((p) => p.key === selected) ?? (opened?.key === selected && opened.account === scope ? opened : undefined)) : undefined
+  /** Opens a pull request, switching to its account first when it is another's (a notification can be). */
+  const openPr = (p: PrSummary): void => {
+    if (p.account && p.account !== scope) pickScope(p.account)
+    setOpened(p)
+    setSelected(p.key)
+  }
 
   return (
     <div className={fullScreen ? 'app fullscreen' : 'app'}>
@@ -212,6 +250,10 @@ export function App() {
                 <GitPullRequest aria-hidden />
                 Pull requests
               </Button>
+              <Button variant={page === 'map' ? 'secondary' : 'ghost'} size="sm" aria-current={page === 'map' ? 'page' : undefined} onClick={() => setPage('map')}>
+                <Network aria-hidden />
+                System map
+              </Button>
               <Button variant={page === 'performance' ? 'secondary' : 'ghost'} size="sm" aria-current={page === 'performance' ? 'page' : undefined} onClick={() => setPage('performance')}>
                 <ChartLine aria-hidden />
                 My performance
@@ -228,28 +270,18 @@ export function App() {
           )}
         </div>
         <div className="topbar-right">
-          {list && (
+          {shown && (
             <NeedsYou
-              prs={list.prs}
+              prs={shown.prs}
+              account={list && list.accounts.length > 1 ? scope : null}
               onShow={() => {
                 setSelected(null)
                 setPage('dashboard')
               }}
             />
           )}
-          {list && (
-            <span className="muted">
-              {list.viewer}, updated {ago(list.fetchedAt)}
-            </span>
-          )}
-          <Notices
-            prs={list?.prs ?? []}
-            current={pr?.key ?? null}
-            onOpen={(p) => {
-              setOpened(p)
-              setSelected(p.key)
-            }}
-          />
+          {list && <span className="muted">updated {ago(list.fetchedAt)}</span>}
+          <Notices account={scope} prs={list?.prs ?? []} current={pr?.key ?? null} onOpen={openPr} />
           <ThemeSwitch />
           <Tooltip>
             <TooltipTrigger asChild>
@@ -268,6 +300,10 @@ export function App() {
         </div>
       </header>
 
+      {/* Under the top bar: the account bar on the left, the page beside it. The window's own buttons stay clear of both. */}
+      <div className="flex min-h-0 flex-1">
+      <AccountRail list={list} scope={scope} onScope={changeScope} onChanged={() => void refresh()} />
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       {error && (
         <div className="banner error flex items-center gap-3" role="alert">
           <span className="min-w-0 flex-1">{error}</span>
@@ -289,31 +325,36 @@ export function App() {
         </div>
       )}
 
-      {pr && list ? (
-        <PrView
-          key={pr.key}
-          pr={pr}
-          progress={progress[pr.key]}
-          onDraftChanged={() => void refresh()}
-        />
-      ) : page === 'performance' ? (
-        <Performance />
-      ) : page === 'settings' ? (
-        <Settings />
-      ) : page === 'storage' ? (
-        <Storage onChanged={() => void refresh()} />
-      ) : list ? (
-        <Dashboard
-          list={list}
-          progress={progress}
-          onOpen={(p) => {
-            setOpened(p)
-            setSelected(p.key)
-          }}
-        />
-      ) : (
+      {/* A scan of a system map ends minutes after it was started, usually while another page is open. */}
+      <MapScanNotices
+        account={scope}
+        onOpen={
+          page === 'map' && !pr
+            ? null
+            : () => {
+                setSelected(null)
+                setPage('map')
+              }
+        }
+      />
+      {/* Each page is keyed by the account, so switching account starts it afresh with that account's own state. */}
+      {!shown || !scope || !list ? (
         !error && <DashboardSkeleton />
+      ) : pr ? (
+        <PrView key={prId(scope, pr.key)} pr={pr} progress={progress[pr.key]} onDraftChanged={() => void refresh()} />
+      ) : page === 'map' ? (
+        <SystemMap key={scope} account={scope} prs={shown.prs} />
+      ) : page === 'performance' ? (
+        <Performance key={scope} account={scope} />
+      ) : page === 'settings' ? (
+        <Settings key={scope} account={scope} />
+      ) : page === 'storage' ? (
+        <Storage key={scope} account={scope} prs={list.prs} first={list.accounts[0]} onChanged={() => void refresh()} />
+      ) : (
+        <Dashboard key={scope} account={scope} list={shown} progress={progress} onOpen={openPr} />
       )}
+      </div>
+      </div>
     </div>
   )
 }

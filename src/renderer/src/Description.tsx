@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { ChevronRight } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
+import { OnGitHub } from './OnGitHub'
 
 const DROP = 'script, style, iframe, object, embed, form, link, meta, base, svg, button, textarea, select'
 const SAFE_URL = /^(https?:|mailto:|#)/i
@@ -34,13 +35,42 @@ function clean(html: string): string {
   return doc.body.innerHTML
 }
 
-/** The pull request description, with its images and videos, above the diff. */
-export function Description({ html, url }: { html: string; url: string }) {
-  const [open, setOpen] = useState(true)
+/** Something GitHub rendered (a description, a comment), cleaned and shown with its images and videos. */
+export function GithubHtml({ html, className }: { html: string; className?: string }) {
   const safe = useMemo(() => clean(html), [html])
-  if (!safe.trim()) return null
   return (
-    <section className="file description">
+    <div
+      className={cn('markdown', className)}
+      // Links leave the app; nothing in the text may navigate this window.
+      onClick={(e) => {
+        const link = (e.target as HTMLElement).closest('a')
+        if (!link) return
+        e.preventDefault()
+        const href = link.getAttribute('href') ?? ''
+        if (href.startsWith('https://')) void window.api.openExternal(href)
+      }}
+      dangerouslySetInnerHTML={{ __html: safe }}
+    />
+  )
+}
+
+/** The pull request description, with its images and videos, at the top of the conversation. */
+export function Description({
+  html,
+  url,
+  heading,
+  className
+}: {
+  html: string
+  url: string
+  /** Shown in place of the word "Description". */
+  heading?: React.ReactNode
+  className?: string
+}) {
+  const [open, setOpen] = useState(true)
+  if (!html.trim()) return null
+  return (
+    <section className={cn('file description', className)}>
       <header className="file-head">
         <Button
           variant="ghost"
@@ -52,25 +82,10 @@ export function Description({ html, url }: { html: string; url: string }) {
         >
           <ChevronRight className={cn('transition-transform', open && 'rotate-90')} aria-hidden />
         </Button>
-        <span className="file-path">Description</span>
-        <Button variant="link" size="xs" className="h-auto px-0" onClick={() => void window.api.openExternal(url)}>
-          On GitHub
-        </Button>
+        <span className="file-path">{heading ?? 'Description'}</span>
+        <OnGitHub url={url} />
       </header>
-      {open && (
-        <div
-          className="markdown"
-          // Links leave the app; nothing in the description may navigate this window.
-          onClick={(e) => {
-            const link = (e.target as HTMLElement).closest('a')
-            if (!link) return
-            e.preventDefault()
-            const href = link.getAttribute('href') ?? ''
-            if (href.startsWith('https://')) void window.api.openExternal(href)
-          }}
-          dangerouslySetInnerHTML={{ __html: safe }}
-        />
-      )}
+      {open && <GithubHtml html={html} />}
     </section>
   )
 }

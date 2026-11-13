@@ -42,7 +42,7 @@ export function fetchDetail(pr: PrSummary): Promise<PrDetail> {
   const running = inflight.get(pr.key)
   if (running) return running
   const p = window.api
-    .prDetail(pr.repo, pr.number)
+    .prDetail(pr.account, pr.repo, pr.number)
     .then((d) => {
       remember(pr.key, d)
       return d

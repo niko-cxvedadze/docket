@@ -1,9 +1,11 @@
 import { app } from 'electron'
-import { readFileSync, writeFileSync, mkdirSync, renameSync, rmSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
+import { keyedQueue, shared } from './env'
 import { graphql, searchCommits } from './github'
+import { originalAccount } from './settings'
 import { readStore, writeStore } from './persist'
-import type { MergedPr, Performance, PrSummary, ReviewGiven, Snapshot } from '../shared/types'
+import type { MergedPr, Performance, PrSummary, ReviewGiven, Snapshot, SnapshotCounts, StoredSnapshot } from '../shared/types'
 
 const WEEKS = 52
 const PAGE = 50
@@ -29,27 +31,70 @@ function writeJson(name: string, value: unknown): void {
 }
 
 // ---------- Daily snapshots of the dashboard ----------
-// GitHub cannot tell us what the queue looked like last week, so Docket writes it down as it goes.
+// GitHub cannot tell us what the queue looked like last week, so Docket writes it down as it goes,
+// each account's queue on its own.
 
 const localDate = (d: Date): string =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 
-export function recordSnapshot(prs: PrSummary[]): void {
+function countsOf(prs: PrSummary[]): SnapshotCounts {
   const mine = prs.filter((p) => p.role === 'mine')
   const queue = prs.filter((p) => p.role === 'review' && p.level !== 'waiting')
-  const today: Snapshot = {
-    date: localDate(new Date()),
+  return {
     blocked: mine.filter((p) => p.level === 'action').length,
     ready: mine.filter((p) => p.level === 'ready').length,
     reviewQueue: queue.length,
     queueLines: queue.reduce((n, p) => n + p.additions + p.deletions, 0)
   }
-  const all = readStore<Snapshot[]>('snapshots.json', []).filter((s) => s.date !== today.date)
-  all.push(today)
-  writeStore('snapshots.json', all.slice(-730))
+}
+
+/**
+ * A stored day with each account's counts. A day from before accounts were kept apart has its
+ * counts at the top level; they are the original account's. While that account is not known yet
+ * the day is left exactly as it is, never dropped.
+ */
+function perAccount(day: StoredSnapshot): StoredSnapshot {
+  if (day.byAccount) return { date: day.date, byAccount: day.byAccount }
+  const original = originalAccount()
+  if (!original) return day
+  return {
+    date: day.date,
+    byAccount: {
+      [original]: { blocked: day.blocked ?? 0, ready: day.ready ?? 0, reviewQueue: day.reviewQueue ?? 0, queueLines: day.queueLines ?? 0 }
+    }
+  }
+}
+
+const storedSnapshots = (): StoredSnapshot[] => readStore<StoredSnapshot[]>('snapshots.json', []).map(perAccount)
+
+/** Writes down today's dashboard for each of these accounts. An account not among them keeps what today already has for it. */
+export function recordSnapshot(prs: PrSummary[], accounts: string[]): void {
+  const all = storedSnapshots()
+  const date = localDate(new Date())
+  const before = all.find((s) => s.date === date)?.byAccount ?? {}
+  const today: StoredSnapshot = {
+    date,
+    byAccount: { ...before, ...Object.fromEntries(accounts.map((account) => [account, countsOf(prs.filter((p) => p.account === account))])) }
+  }
+  writeStore('snapshots.json', [...all.filter((s) => s.date !== date), today].slice(-730))
+}
+
+/** One account's days, oldest first. */
+function snapshotsOf(account: string): Snapshot[] {
+  return storedSnapshots().flatMap((s) => {
+    const counts = s.byAccount?.[account]
+    return counts ? [{ date: s.date, ...counts }] : []
+  })
+}
+
+/** How much of the snapshots is one account's, for the storage page. */
+export const snapshotBytes = (account: string): number => {
+  const days = snapshotsOf(account)
+  return days.length ? Buffer.byteLength(JSON.stringify(days)) : 0
 }
 
 // ---------- History from GitHub ----------
+// Kept per account: each has its own year of history, fetched and refreshed on its own.
 
 const QUERY = `
 query($q: String!, $after: String) {
@@ -82,7 +127,7 @@ interface Node {
   timelineItems: { nodes: { createdAt?: string; requestedReviewer?: { login?: string } | null }[] }
 }
 
-async function searchAll(q: string): Promise<{ viewer: string; nodes: Node[]; truncated: boolean }> {
+async function searchAll(account: string, q: string): Promise<{ viewer: string; nodes: Node[]; truncated: boolean }> {
   const nodes: Node[] = []
   let after: string | null = null
   let viewer = ''
@@ -90,7 +135,7 @@ async function searchAll(q: string): Promise<{ viewer: string; nodes: Node[]; tr
     const data: {
       viewer: { login: string }
       search: { pageInfo: { hasNextPage: boolean; endCursor: string | null }; nodes: Node[] }
-    } = await graphql(QUERY, { q, after }, { background: true })
+    } = await graphql(account, QUERY, { q, after }, { background: true })
     viewer = data.viewer.login
     nodes.push(...data.search.nodes.filter((n) => n?.repository))
     if (!data.search.pageInfo.hasNextPage) return { viewer, nodes, truncated: false }
@@ -105,21 +150,21 @@ interface Range {
   truncated: boolean
 }
 
-/** Both kinds of history for one date range. */
-async function searchRange(from: number, to: number): Promise<{ authored: Range; reviewed: Range }> {
+/** Both kinds of history for one account and one date range. */
+async function searchRange(account: string, from: number, to: number): Promise<{ authored: Range; reviewed: Range }> {
   const range = `${new Date(from).toISOString().slice(0, 10)}..${new Date(to).toISOString().slice(0, 10)}`
   const [authored, reviewed] = await Promise.all([
-    searchAll(`is:pr is:merged author:@me merged:${range}`),
-    searchAll(`is:pr reviewed-by:@me -author:@me updated:${range}`)
+    searchAll(account, `is:pr is:merged author:@me merged:${range}`),
+    searchAll(account, `is:pr reviewed-by:@me -author:@me updated:${range}`)
   ])
   return { authored, reviewed }
 }
 
 const keyOf = (n: Node): string => `${n.repository.nameWithOwner}#${n.number}`
 
-/** Fold one date range of GitHub history into what is already stored. */
-async function mergeRange(state: Performance, from: number, to: number, horizonIso: string): Promise<Performance> {
-  const { authored, reviewed } = await searchRange(from, to)
+/** Fold one date range of an account's GitHub history into what is already stored for it. */
+async function mergeRange(account: string, state: Performance, from: number, to: number, horizonIso: string): Promise<Performance> {
+  const { authored, reviewed } = await searchRange(account, from, to)
   const me = authored.viewer || reviewed.viewer
 
   const merged = new Map<string, MergedPr>(state.merged.map((m) => [m.key, m]))
@@ -179,9 +224,9 @@ async function mergeRange(state: Performance, from: number, to: number, horizonI
   }
 }
 
-/** Fold one date range of the user's commits into what is already stored. */
-async function mergeCommits(state: Performance, from: number, to: number, horizonIso: string): Promise<Performance> {
-  const found = await searchCommits(from, to)
+/** Fold one date range of an account's commits into what is already stored for it. */
+async function mergeCommits(account: string, state: Performance, from: number, to: number, horizonIso: string): Promise<Performance> {
+  const found = await searchCommits(account, from, to)
   const bySha = new Map(state.commits.map((c) => [c.sha, c]))
   for (const c of found.commits) bySha.set(c.sha, c)
   return {
@@ -195,30 +240,81 @@ const horizonOf = (now: number): number => now - WEEKS * 7 * DAY
 const reaches = (since: string | undefined, now: number): boolean =>
   !!since && new Date(since).getTime() <= horizonOf(now) + 2 * DAY
 const isComplete = (s: Performance, now: number): boolean => reaches(s.since, now) && reaches(s.commitsSince, now)
-// History saved before commits were tracked has no commit list yet.
-const stored = (): Performance | null => {
-  const s = readJson<Performance | null>('performance.json', null)
-  return s && { ...s, commits: s.commits ?? [] }
+
+/** performance.json: every account's history, by login. */
+interface HistoryFile {
+  version: 2
+  accounts: Record<string, Performance>
 }
-const save = (s: Performance): Performance => {
-  writeJson('performance.json', { ...s, snapshots: [], partial: undefined })
+
+/**
+ * The file as it is now, whatever shape it was saved in. Before accounts were kept apart it held
+ * one history: the original account's, or for a short while two accounts' mixed together with
+ * each entry saying whose it was. Either way each account ends up with its own.
+ */
+function readHistory(): HistoryFile {
+  const raw = readJson<(Partial<HistoryFile> & Partial<Performance> & { accounts?: unknown }) | null>('performance.json', null)
+  if (!raw) return { version: 2, accounts: {} }
+  if (raw.version === 2 && raw.accounts && !Array.isArray(raw.accounts)) return { version: 2, accounts: raw.accounts as Record<string, Performance> }
+  if (!raw.fetchedAt || !Array.isArray(raw.merged)) return { version: 2, accounts: {} }
+  const old = raw as Performance
+  type Tagged = { account?: string }
+  const logins = Array.isArray(raw.accounts) ? (raw.accounts as string[]) : []
+  const original = originalAccount()
+  const owners = logins.length ? logins : original ? [original] : []
+  // Two accounts mixed together without saying whose each entry is cannot be told apart; GitHub has it all, so it is fetched again.
+  if (owners.length > 1 && [...old.merged, ...(old.reviews ?? []), ...(old.commits ?? [])].some((x) => !(x as Tagged).account))
+    return { version: 2, accounts: {} }
+  const whose = (x: Tagged): string | undefined => x.account ?? (owners.length === 1 ? owners[0] : original)
+  const strip = <T extends Tagged>(x: T): T => {
+    const { account: _owner, ...rest } = x
+    return rest as T
+  }
+  return {
+    version: 2,
+    accounts: Object.fromEntries(
+      owners.map((login) => [
+        login,
+        {
+          ...old,
+          merged: (old.merged as (MergedPr & Tagged)[]).filter((x) => whose(x) === login).map(strip),
+          reviews: ((old.reviews ?? []) as (ReviewGiven & Tagged)[]).filter((x) => whose(x) === login).map(strip),
+          commits: ((old.commits ?? []) as (Performance['commits'][number] & Tagged)[]).filter((x) => whose(x) === login).map(strip),
+          snapshots: []
+        }
+      ])
+    )
+  }
+}
+
+// History saved before commits were tracked has no commit list yet.
+const stored = (account: string): Performance | null => {
+  const s = readHistory().accounts[account]
+  return s ? { ...s, commits: s.commits ?? [] } : null
+}
+/** Reads and writes in one step, so two accounts saving at once never lose each other's history. */
+const save = (account: string, s: Performance): Performance => {
+  const file = readHistory()
+  file.accounts[account] = { ...s, snapshots: [], partial: undefined }
+  writeJson('performance.json', file)
   return s
 }
 
-// One GitHub history job at a time, so two of them never overwrite each other's saved result.
-let chain: Promise<unknown> = Promise.resolve()
-const serial = <T>(job: () => Promise<T>): Promise<T> => {
-  const run = chain.then(job, job)
-  chain = run.catch(() => undefined)
-  return run
+/** How much of the saved history is one account's, for the storage page. */
+export const historyBytes = (account: string): number => {
+  const s = readHistory().accounts[account]
+  return s ? Buffer.byteLength(JSON.stringify(s)) : 0
 }
 
-/** Bring the stored history up to date with what changed since the last fetch (or the last four weeks, the first time). */
-function refreshRecent(): Promise<Performance> {
-  return serial(async () => {
+// One GitHub history job at a time per account, so two of them never overwrite each other's saved result.
+const serial = keyedQueue()
+
+/** Bring an account's stored history up to date with what changed since the last fetch (or the last four weeks, the first time). */
+function refreshRecent(account: string): Promise<Performance> {
+  return serial(account, async () => {
     const now = Date.now()
     const horizonIso = new Date(horizonOf(now)).toISOString()
-    const cached = stored()
+    const cached = stored(account)
     const from = cached
       ? Math.max(horizonOf(now), new Date(cached.fetchedAt).getTime() - 2 * DAY)
       : now - CHUNK_DAYS * DAY
@@ -233,8 +329,8 @@ function refreshRecent(): Promise<Performance> {
     }
     // Commits joined the history later, so they may start from nothing while the rest is a year deep.
     const commitsFrom = base.commitsSince ? from : now - CHUNK_DAYS * DAY
-    const state = await mergeCommits(await mergeRange(base, from, now + DAY, horizonIso), commitsFrom, now + DAY, horizonIso)
-    return save({
+    const state = await mergeCommits(account, await mergeRange(account, base, from, now + DAY, horizonIso), commitsFrom, now + DAY, horizonIso)
+    return save(account, {
       ...state,
       commitsSince: base.commitsSince ?? new Date(commitsFrom).toISOString(),
       fetchedAt: new Date(now).toISOString(),
@@ -247,63 +343,81 @@ function refreshRecent(): Promise<Performance> {
  * Older months are fetched in the background, newest first, saving after each one. An interruption
  * (a rate limit, quitting the app) loses nothing: the next run continues from the last saved month.
  */
-let backfilling = false
-function startBackfill(): void {
-  if (backfilling) return
-  backfilling = true
+const backfilling = new Set<string>()
+function startBackfill(account: string): void {
+  if (backfilling.has(account)) return
+  backfilling.add(account)
   void (async () => {
     try {
       for (;;) {
-        const done = await serial(async () => {
+        const done = await serial(account, async () => {
           const now = Date.now()
-          const state = stored()
+          const state = stored(account)
           if (!state || isComplete(state, now)) return true
           const horizonIso = new Date(horizonOf(now)).toISOString()
           if (!reaches(state.since, now)) {
             const since = new Date(state.since).getTime()
             const from = Math.max(horizonOf(now), since - CHUNK_DAYS * DAY)
-            const next = await mergeRange(state, from, since + DAY, horizonIso)
-            save({ ...next, since: new Date(from).toISOString() })
+            const next = await mergeRange(account, state, from, since + DAY, horizonIso)
+            save(account, { ...next, since: new Date(from).toISOString() })
           } else {
             const since = new Date(state.commitsSince ?? now).getTime()
             const from = Math.max(horizonOf(now), since - CHUNK_DAYS * DAY)
-            const next = await mergeCommits(state, from, since + DAY, horizonIso)
-            save({ ...next, commitsSince: new Date(from).toISOString() })
+            const next = await mergeCommits(account, state, from, since + DAY, horizonIso)
+            save(account, { ...next, commitsSince: new Date(from).toISOString() })
           }
           return false
         })
         if (done) break
       }
     } catch (e) {
-      console.error('history backfill interrupted, will continue next time:', e)
+      console.error(`history backfill for ${account} interrupted, will continue next time:`, e)
     } finally {
-      backfilling = false
+      backfilling.delete(account)
     }
   })()
 }
 
-let refreshing: Promise<Performance> | null = null
+const refreshing = new Map<string, Promise<Performance>>()
 
-export async function getPerformance(force: boolean): Promise<Performance> {
-  const snapshots = readStore<Snapshot[]>('snapshots.json', [])
-  let state = stored()
+/** One account's history: its merged pull requests, reviews and commits, and its daily snapshots. */
+export async function getPerformance(account: string, force: boolean): Promise<Performance> {
+  const snapshots = snapshotsOf(account)
+  let state = stored(account)
   const fresh = !!state && Date.now() - new Date(state.fetchedAt).getTime() < FRESH_MS
   if (!state || force || !fresh) {
-    refreshing ??= refreshRecent().finally(() => (refreshing = null))
     try {
-      state = await refreshing
+      state = await shared(refreshing, account, () => refreshRecent(account))
     } catch (e) {
       if (!state) throw e
       console.error('could not refresh recent history, showing what is stored:', e)
     }
   }
   const complete = isComplete(state, Date.now())
-  if (!complete) startBackfill()
+  if (!complete) startBackfill(account)
   return { ...state, snapshots, partial: !complete }
 }
 
-/** Delete stored history. Waits for any GitHub job in flight, so it cannot write the file back afterwards. */
-export function clearHistory(name: 'performance.json' | 'snapshots.json'): Promise<void> {
-  // Snapshots cannot be fetched again, so they are emptied (and stay in the backups) rather than deleted.
-  return serial(async () => (name === 'snapshots.json' ? writeStore('snapshots.json', []) : rmSync(path(name), { force: true })))
+/**
+ * Clears one account's stored history; other accounts keep theirs. Waits for any GitHub job of that
+ * account in flight, so it cannot write the history back afterwards.
+ */
+export function clearHistory(account: string, name: 'performance.json' | 'snapshots.json'): Promise<void> {
+  return serial(account, async () => {
+    if (name === 'performance.json') {
+      const file = readHistory()
+      delete file.accounts[account]
+      return writeJson('performance.json', file)
+    }
+    // Snapshots cannot be fetched again: the account's counts are taken out of each day, the file
+    // is written (never deleted), and what was there stays in the backups.
+    const days = storedSnapshots()
+      .map((s) => {
+        if (!s.byAccount?.[account]) return s
+        const { [account]: _gone, ...rest } = s.byAccount
+        return { ...s, byAccount: rest }
+      })
+      .filter((s) => !s.byAccount || Object.keys(s.byAccount).length > 0)
+    writeStore('snapshots.json', days)
+  })
 }

@@ -1,4 +1,5 @@
-import { ExternalLink, History, NotebookPen } from 'lucide-react'
+import { History, NotebookPen } from 'lucide-react'
+import { OnGitHub } from './OnGitHub'
 import type { PostedReview, Verdict } from '../../shared/types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -87,10 +88,7 @@ export function PostedReviewView({ review, onJump }: { review: PostedReview; onJ
           {new Date(review.at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}
           {review.model || review.effort ? `, drafted with ${[review.model, review.effort && `${review.effort} effort`].filter(Boolean).join(', ')}` : ''}
         </span>
-        <Button variant="link" size="xs" className="ml-auto h-auto px-0" onClick={() => void window.api.openExternal(review.url)}>
-          <ExternalLink aria-hidden />
-          On GitHub
-        </Button>
+        <OnGitHub url={review.url} icon className="ml-auto" />
       </div>
       {review.body.trim() ? (
         <div className="rounded-lg border bg-background p-3">

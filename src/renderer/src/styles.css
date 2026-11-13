@@ -29,6 +29,12 @@
   --color-danger-bg: var(--danger-bg);
   --color-tint: var(--hunk-bg);
   --color-neutral-mark: var(--neutral-mark);
+  /* The kinds of parts on a system map. */
+  --color-kind-entry: var(--kind-entry);
+  --color-kind-service: var(--kind-service);
+  --color-kind-job: var(--kind-job);
+  --color-kind-data: var(--kind-data);
+  --color-kind-external: var(--kind-external);
   --radius-sm: 4px;
   --radius-md: 6px;
   --radius-lg: 8px;
@@ -71,6 +77,11 @@
   --neutral-mark: #a1a1aa;
   --series-1: #7c3aed;
   --series-2: #d97706;
+  --kind-entry: #2563eb;
+  --kind-service: #7c3aed;
+  --kind-job: #c2410c;
+  --kind-data: #0f766e;
+  --kind-external: #be185d;
   --mono: ui-monospace, 'SF Mono', Menlo, monospace;
   color-scheme: light dark;
 }
@@ -110,6 +121,11 @@
     --neutral-mark: #71717a;
     --series-1: #8b5cf6;
     --series-2: #f59e0b;
+    --kind-entry: #60a5fa;
+    --kind-service: #a78bfa;
+    --kind-job: #fb923c;
+    --kind-data: #2dd4bf;
+    --kind-external: #f472b6;
   }
 }
 

@@ -1,7 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   DraftComment,
-  ExistingComment,
   PrDetail,
   PrFile,
   PostedReview,
@@ -11,19 +10,21 @@ import type {
   Verdict
 } from '../../shared/types'
 import { commentableLines, parsePatch, type DiffRow } from '../../shared/diff'
-import { ago, cleanError } from './util'
-import { Bug, Check, ChevronRight, CircleCheck, CircleDot, ClipboardCheck, Copy, ExternalLink, FlaskConical, Gauge, MessageSquare, MessagesSquare, NotebookPen, Plus, ScanSearch, ShieldAlert, Trash2 } from 'lucide-react'
+import { ago, cleanError, isCopyKey, recall, recallJson, remember, toggled, VIEWED_PREFIX, viewedKey } from './util'
+import { SelectionBar } from './SelectionBar'
+import { toast } from 'sonner'
+import { ArrowRight, Bug, Check, ChevronRight, CircleCheck, CircleDot, ClipboardCheck, Copy, ExternalLink, FileDiff as FileDiffIcon, FlaskConical, Gauge, GitBranch, MessageSquare, MessagesSquare, NotebookPen, Plus, ScanSearch, ShieldAlert, Trash2 } from 'lucide-react'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
-import { PrChat } from './PrChat'
+import { Asked, PrChat } from './PrChat'
 import { Badge } from '@/components/ui/badge'
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Author } from './Author'
-import { Description } from './Description'
+import { Conversation } from './Conversation'
+import { ExistingThread, SelectionContext, type Selection } from './ThreadView'
+import { commentKey, countThreads, reviewKey, threadKey, threadsOf, toMarkdown, whereOf, type Picked, type Thread } from './threads'
 import { Composer, Shortcuts, type Shortcut } from './Composer'
-import { Markdown } from './Markdown'
 import { Confirm } from './Confirm'
 import { PostedReviewView, ReviewHistoryBar } from './ReviewHistory'
 import {
@@ -125,105 +126,12 @@ function DraftCard({
   )
 }
 
-/** A conversation already on GitHub: the first comment and its replies, in order. */
-interface Thread {
-  id: string
-  comments: ExistingComment[]
-  resolved: boolean | null
-  resolvedBy: string | null
-}
-
-function threadsOf(comments: ExistingComment[]): Thread[] {
-  const map = new Map<string, Thread>()
-  for (const c of [...comments].sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
-    const key = c.thread || `c${c.id}`
-    let t = map.get(key)
-    if (!t) map.set(key, (t = { id: key, comments: [], resolved: c.resolved, resolvedBy: c.resolvedBy }))
-    t.comments.push(c)
-  }
-  return [...map.values()]
-}
-
-function ExistingCard({ comment, where, reply }: { comment: ExistingComment; where?: string; reply?: boolean }) {
-  return (
-    <div className={cn('grid gap-1', reply && 'mt-2 border-t pt-2')}>
-      <div className="flex flex-wrap items-center gap-2 text-xs">
-        <Author author={{ login: comment.author, avatarUrl: comment.avatarUrl }} className="font-semibold" />
-        <span className="text-muted-foreground">
-          {ago(comment.createdAt)}
-          {where ? `, ${where}` : ''}
-        </span>
-        <Button variant="link" size="xs" className="ml-auto h-auto px-0" onClick={() => void window.api.openExternal(comment.url)}>
-          On GitHub
-        </Button>
-      </div>
-      <Markdown text={comment.body} className="text-[13px]" />
-    </div>
-  )
-}
-
-/** Unresolved threads stay open and marked; resolved ones fold to one line, as on GitHub. */
-function ExistingThread({ thread, where }: { thread: Thread; where?: string }) {
-  const [open, setOpen] = useState(thread.resolved !== true)
-  const [first, ...replies] = thread.comments
-  const status =
-    thread.resolved === true ? (
-      <Badge variant="outline" className="gap-1 border-ready/40 bg-ready-bg text-ready">
-        <CircleCheck aria-hidden />
-        Resolved{thread.resolvedBy ? ` by ${thread.resolvedBy}` : ''}
-      </Badge>
-    ) : thread.resolved === false ? (
-      <Badge variant="outline" className="gap-1 border-action/40 bg-action-bg text-action">
-        <CircleDot aria-hidden />
-        Unresolved
-      </Badge>
-    ) : null
-  return (
-    <Collapsible
-      open={open}
-      onOpenChange={setOpen}
-      className={cn(
-        'existing border-l-[3px]',
-        thread.resolved === true ? 'border-l-ready/60 opacity-80' : thread.resolved === false ? 'border-l-action' : ''
-      )}
-    >
-      <div className="mb-1.5 flex items-center gap-2">
-        {status}
-        {!open && (
-          <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
-            {first.author}: {first.body.split('\n')[0]}
-          </span>
-        )}
-        <CollapsibleTrigger asChild>
-          <Button variant="ghost" size="xs" className="ml-auto text-muted-foreground">
-            <ChevronRight className={cn('transition-transform', open && 'rotate-90')} aria-hidden />
-            {open
-              ? 'Hide'
-              : `Show ${thread.comments.length === 1 ? 'comment' : `${thread.comments.length} comments`}`}
-          </Button>
-        </CollapsibleTrigger>
-      </div>
-      <CollapsibleContent>
-        <ExistingCard comment={first} where={where} />
-        {replies.map((c) => (
-          <ExistingCard key={c.id} comment={c} reply />
-        ))}
-      </CollapsibleContent>
-    </Collapsible>
-  )
-}
-
-const countThreads = (threads: Thread[]): { open: number; resolved: number } => ({
-  open: threads.filter((t) => t.resolved !== true).length,
-  resolved: threads.filter((t) => t.resolved === true).length
-})
-
 const FileDiff = memo(function FileDiff({
   index,
   file,
   rows,
   drafts,
-  existing,
+  threads,
   readOnly,
   viewed,
   onViewed,
@@ -237,7 +145,8 @@ const FileDiff = memo(function FileDiff({
   file: PrFile
   rows: DiffRow[]
   drafts: DraftComment[]
-  existing: ExistingComment[]
+  /** The conversations on GitHub that started in this file. */
+  threads: Thread[]
   readOnly: boolean
   onAdd: (path: string, line: number) => void
   onChange: (c: DraftComment) => void
@@ -260,7 +169,6 @@ const FileDiff = memo(function FileDiff({
     const newLines = new Set(rows.filter((r) => r.type !== 'del' && r.type !== 'hunk').map((r) => r.newLine))
     const oldLines = new Set(rows.filter((r) => r.type === 'del').map((r) => r.oldLine))
     const loose: Thread[] = []
-    const threads = threadsOf(existing)
     for (const t of threads) {
       const c = t.comments[0]
       const [lines, map] = c.side === 'LEFT' ? [oldLines, left] : [newLines, right]
@@ -268,7 +176,7 @@ const FileDiff = memo(function FileDiff({
       else loose.push(t)
     }
     return { right, left, loose, counts: countThreads(threads) }
-  }, [rows, existing])
+  }, [rows, threads])
   return (
     <section className={viewed ? 'file viewed' : 'file'} id={`f-${index}`}>
       <header className="file-head">
@@ -348,11 +256,7 @@ const FileDiff = memo(function FileDiff({
         <div className="loose-comments">
           <p className="muted small">Comments on lines that have since changed or are outside this diff</p>
           {placed.loose.map((t) => (
-            <ExistingThread
-              key={t.id}
-              thread={t}
-              where={t.comments[0].originalLine ? `was on line ${t.comments[0].originalLine}` : undefined}
-            />
+            <ExistingThread key={t.id} thread={t} where={looseWhere(t)} />
           ))}
         </div>
       )}
@@ -412,7 +316,8 @@ const FileDiff = memo(function FileDiff({
                       <tr className="thread">
                         <td colSpan={4}>
                           {old.map((t) => (
-                            <ExistingThread key={t.id} thread={t} />
+                            // A comment made on several lines sits under the last of them and says which.
+                            <ExistingThread key={t.id} thread={t} where={t.comments[0].startLine !== null ? whereOf(t.comments[0]) : undefined} />
                           ))}
                           {here.map((c) => (
                             <DraftCard key={c.id} comment={c} readOnly={readOnly} onChange={onChange} onRemove={onRemove} />
@@ -430,6 +335,13 @@ const FileDiff = memo(function FileDiff({
   )
 })
 
+/** Where a thread that could not be put on its line used to be, or still is outside the lines shown. */
+function looseWhere(t: Thread): string | undefined {
+  const first = t.comments[0]
+  const where = whereOf(first)
+  return where ? `${first.line === null ? 'was on' : 'on'} ${where}` : undefined
+}
+
 function FragmentRow({ children }: { children: React.ReactNode }) {
   return <>{children}</>
 }
@@ -442,46 +354,64 @@ function fileSignature(file: PrFile): string {
   return `${file.status}:${text.length}:${h}`
 }
 
-const viewedKey = (prKey: string): string => `docket.viewed.${prKey}`
-const loadViewed = (prKey: string): Record<string, string> => {
-  try {
-    return JSON.parse(localStorage.getItem(viewedKey(prKey)) ?? '{}') as Record<string, string>
-  } catch {
-    return {}
-  }
-}
+/** The two pages of a pull request, as on GitHub: what was said, and what changed. */
+type Page = 'conversation' | 'files'
+const PAGE_KEY = 'docket.prPage'
+const loadPage = (): Page => (recall(PAGE_KEY) === 'files' ? 'files' : 'conversation')
+
+// Each account has its own marks. Ones saved before accounts were kept apart name only the pull request; they are read until the account saves its own.
+const loadViewed = (pr: PrSummary): Record<string, string> =>
+  recallJson<Record<string, string>>(viewedKey(pr.account, pr.key), {}, `${VIEWED_PREFIX}${pr.key}`)
 
 export function PrView({ pr, progress, onDraftChanged }: Props) {
   // A page opened before shows at once from the cache; load() then refreshes it if needed.
   const [detail, setDetail] = useState<PrDetail | null>(() => peekDetail(pr.key))
   const [draft, setDraft] = useState<ReviewDraft | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
-  const [branchCopied, setBranchCopied] = useState(false)
+  // The branch name just copied, so its chip can say so.
+  const [branchCopied, setBranchCopied] = useState<string | null>(null)
   const [sideTab, setSideTab] = useState<'review' | 'chat'>('review')
+  // The page used last opens first on the next pull request.
+  const [page, setPage] = useState<Page>(loadPage)
+  const showPage = useCallback((next: Page) => {
+    setPage(next)
+    remember(PAGE_KEY, next)
+  }, [])
+  // Comments selected for copying, by key. Selected like rows on the dashboard: Cmd-click, then Cmd-C.
+  const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set())
+  const toggle = useCallback((key: string) => setSelected((prev) => toggled(prev, key)), [])
   // Reviews already posted on this pull request; one of them can be opened read-only.
   const [postedReviews, setPostedReviews] = useState<PostedReview[]>([])
   const [viewingReview, setViewingReview] = useState<PostedReview | null>(null)
   const loadReviews = useCallback(
-    () => window.api.listReviews(pr.key).then(setPostedReviews, () => undefined),
+    () => window.api.listReviews(pr.account, pr.key).then(setPostedReviews, () => undefined),
     [pr.key]
   )
   useEffect(() => {
     void loadReviews()
   }, [loadReviews])
   const [focus, setFocus] = useState('')
+  // The focus the running review was started with. It leaves the box when sent and shows above the progress.
+  const [asked, setAsked] = useState('')
+  // Between pressing Review and the first word from the review itself, so the page answers the click at once.
+  const [starting, setStarting] = useState(false)
+  useEffect(() => {
+    if (progress) setStarting(false)
+  }, [progress])
+  useEffect(() => {
+    // A review that was stopped or failed gives the focus back, ready to send again.
+    if (progress?.state === 'error' || progress?.state === 'cancelled') setFocus((f) => f || asked)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [progress?.state])
   // Path to the signature of the diff that was on screen when the file was marked viewed.
-  const [viewedMarks, setViewedMarks] = useState(() => loadViewed(pr.key))
+  const [viewedMarks, setViewedMarks] = useState(() => loadViewed(pr))
   const onViewed = useCallback(
     (file: PrFile, on: boolean) =>
       setViewedMarks((prev) => {
         const next = { ...prev }
         if (on) next[file.path] = fileSignature(file)
         else delete next[file.path]
-        try {
-          localStorage.setItem(viewedKey(pr.key), JSON.stringify(next))
-        } catch {
-          /* remembered for this visit only */
-        }
+        remember(viewedKey(pr.account, pr.key), JSON.stringify(next))
         return next
       }),
     [pr.key]
@@ -492,7 +422,8 @@ export function PrView({ pr, progress, onDraftChanged }: Props) {
   const [postError, setPostError] = useState<string | null>(null)
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   // Pane widths are remembered between pull requests and launches.
-  const layout = useDefaultLayout({ id: 'docket-pr-panes', storage: localStorage })
+  const layout = useDefaultLayout({ id: 'docket-pr-main', storage: localStorage })
+  const filesLayout = useDefaultLayout({ id: 'docket-pr-files', storage: localStorage })
   const latest = useRef<ReviewDraft | null>(null)
   /** Whether a draft for this pull request currently exists on disk. */
   const stored = useRef(false)
@@ -500,9 +431,9 @@ export function PrView({ pr, progress, onDraftChanged }: Props) {
   /** The draft, and the page unless the cached one is still fresh. `force` always asks GitHub (after posting). */
   const load = useCallback(
     async (force = false) => {
-      const draftLoad = window.api.getDraft(pr.key).then((dr) => {
+      const draftLoad = window.api.getDraft(pr.account, pr.key).then((dr) => {
         const real = dr && hasContent(dr) ? dr : null
-        if (dr && !real) void window.api.discardDraft(pr.key, 'empty draft on load')
+        if (dr && !real) void window.api.discardDraft(pr.account, pr.key, 'empty draft on load')
         setDraft(real)
         latest.current = real
         stored.current = !!real
@@ -534,7 +465,7 @@ export function PrView({ pr, progress, onDraftChanged }: Props) {
     if (saveTimer.current && mine) {
       clearTimeout(saveTimer.current)
       saveTimer.current = null
-      void window.api.getDraft(pr.key).then(async (disk) => {
+      void window.api.getDraft(pr.account, pr.key).then(async (disk) => {
         if (disk && disk.createdAt === mine.createdAt) {
           const ids = new Set(mine.comments.map((c) => c.id))
           await window.api.saveDraft({ ...mine, comments: [...mine.comments, ...disk.comments.filter((c) => !ids.has(c.id))] })
@@ -557,7 +488,7 @@ export function PrView({ pr, progress, onDraftChanged }: Props) {
         const real = !!latest.current && hasContent(latest.current)
         const changed = real !== stored.current
         if (real) void window.api.saveDraft(latest.current!).then(() => changed && draftChanged.current())
-        else if (stored.current) void window.api.discardDraft(pr.key, 'emptied, saved on leaving').then(() => draftChanged.current())
+        else if (stored.current) void window.api.discardDraft(pr.account, pr.key, 'emptied, saved on leaving').then(() => draftChanged.current())
       }
     },
     []
@@ -568,6 +499,7 @@ export function PrView({ pr, progress, onDraftChanged }: Props) {
       setDraft((prev) => {
         const base: ReviewDraft = prev ?? {
           key: pr.key,
+          account: pr.account,
           headSha: detail?.headSha ?? pr.headSha,
           createdAt: new Date().toISOString(),
           summary: '',
@@ -584,7 +516,7 @@ export function PrView({ pr, progress, onDraftChanged }: Props) {
           const real = hasContent(next)
           const changed = real !== stored.current
           stored.current = real
-          void (real ? window.api.saveDraft(next) : changed ? window.api.discardDraft(pr.key, 'emptied while editing') : Promise.resolve()).then(
+          void (real ? window.api.saveDraft(next) : changed ? window.api.discardDraft(pr.account, pr.key, 'emptied while editing') : Promise.resolve()).then(
             () => changed && onDraftChanged()
           )
         }, 400)
@@ -628,37 +560,82 @@ export function PrView({ pr, progress, onDraftChanged }: Props) {
   const lineSets = useMemo(() => new Map(parsed.map((p) => [p.file.path, p.lines])), [parsed])
   const inDiff = useCallback((c: DraftComment) => lineSets.get(c.path)?.has(c.line) ?? false, [lineSets])
 
-  const byFile = useMemo(() => {
+  const draftsByFile = useMemo(() => {
     const drafts = new Map<string, DraftComment[]>()
     for (const c of draft?.comments ?? [])
       if (inDiff(c)) drafts.set(c.path, [...(drafts.get(c.path) ?? []), c])
-    const existing = new Map<string, ExistingComment[]>()
-    for (const c of detail?.comments ?? []) existing.set(c.path, [...(existing.get(c.path) ?? []), c])
-    return { drafts, existing }
-  }, [draft?.comments, detail?.comments, inDiff])
+    return drafts
+  }, [draft?.comments, inDiff])
+  // The conversations on GitHub, grouped once here and handed to both pages. A conversation belongs to the file it started in.
+  const threads = useMemo(() => threadsOf(detail?.comments ?? []), [detail])
+  const threadsByFile = useMemo(() => {
+    const map = new Map<string, Thread[]>()
+    for (const t of threads) map.set(t.comments[0].path, [...(map.get(t.comments[0].path) ?? []), t])
+    return map
+  }, [threads])
 
   const viewed = useMemo(
     () => new Set((detail?.files ?? []).filter((f) => viewedMarks[f.path] === fileSignature(f)).map((f) => f.path)),
     [detail, viewedMarks]
   )
-  const discussion = useMemo(
-    () => new Map([...byFile.existing].map(([path, list]) => [path, countThreads(threadsOf(list))])),
-    [byFile.existing]
-  )
-  const conversations = useMemo(() => {
-    let open = 0
-    let resolved = 0
-    for (const c of discussion.values()) {
-      open += c.open
-      resolved += c.resolved
+  const discussion = useMemo(() => new Map([...threadsByFile].map(([path, list]) => [path, countThreads(list)])), [threadsByFile])
+  const conversations = useMemo(() => countThreads(threads), [threads])
+  const commentCounts = useMemo(() => new Map([...draftsByFile].map(([path, list]) => [path, list.length])), [draftsByFile])
+
+  /** Everything that can be selected, by key, in the order it is copied: general comments by date, then conversations by file and line. */
+  const copyable = useMemo(() => {
+    const general: { key: string; at: string; item: Picked }[] = [
+      ...(detail?.reviews ?? []).map((review) => ({ key: reviewKey(review), at: review.submittedAt, item: { kind: 'review' as const, review } })),
+      ...(detail?.conversation ?? []).map((comment) => ({ key: commentKey(comment), at: comment.createdAt, item: { kind: 'comment' as const, comment } }))
+    ].sort((a, b) => a.at.localeCompare(b.at))
+    const map = new Map<string, Picked>()
+    for (const g of general) map.set(g.key, g.item)
+    const fileOrder = new Map((detail?.files ?? []).map((f, i) => [f.path, i]))
+    const place = (t: Thread): [number, number] => {
+      const c = t.comments[0]
+      return [fileOrder.get(c.path) ?? 1e9, c.line ?? c.originalLine ?? 0]
     }
-    return { open, resolved }
-  }, [discussion])
-  const commentCounts = useMemo(
-    () => new Map([...byFile.drafts].map(([path, list]) => [path, list.length])),
-    [byFile.drafts]
+    const sorted = [...threads].sort((a, b) => place(a)[0] - place(b)[0] || place(a)[1] - place(b)[1])
+    for (const thread of sorted) map.set(threadKey(thread), { kind: 'thread', thread })
+    return map
+  }, [detail, threads])
+  /** Puts these comments on the clipboard as markdown. `done` runs once they are there. */
+  const copy = useCallback(
+    (keys: string[], done?: () => void): void => {
+      const want = new Set(keys)
+      const items = [...copyable].filter(([key]) => want.has(key)).map(([, item]) => item)
+      if (!items.length) return
+      void window.api.copyText(toMarkdown(pr, items)).then(
+        () => {
+          toast.success(items.length === 1 ? 'Copied comment' : `Copied ${items.length} comments`, {
+            description: 'As markdown, with the file, lines and code each one is about. Paste it to Claude.'
+          })
+          done?.()
+        },
+        (e) => toast.error('Could not copy', { description: cleanError(e) })
+      )
+    },
+    [copyable, pr]
   )
-  const running = progress?.state === 'running'
+  const selection = useMemo<Selection>(() => ({ selected, toggle, copy }), [selected, toggle, copy])
+  // A selected comment that has since gone from GitHub no longer counts.
+  const picked = useMemo(() => [...selected].filter((key) => copyable.has(key)), [selected, copyable])
+  // The selection was only made to copy it, so it is done once the comments are on the clipboard.
+  const copySelected = useCallback(() => copy(picked, () => setSelected(new Set())), [copy, picked])
+  // Cmd-C copies the selection; Escape drops it. Text selected on the page still copies as text.
+  useEffect(() => {
+    if (!picked.length) return
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') return setSelected(new Set())
+      if (e.shiftKey || !isCopyKey(e)) return
+      e.preventDefault()
+      copySelected()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [picked.length, copySelected])
+  const unresolved = useMemo(() => threads.filter((t) => t.resolved !== true).map(threadKey), [threads])
+  const running = starting || progress?.state === 'running'
   const real = !!draft && hasContent(draft)
   const written = (draft?.comments ?? []).filter((c) => c.body.trim())
   const posted = draft?.posted
@@ -688,6 +665,7 @@ export function PrView({ pr, progress, onDraftChanged }: Props) {
         .filter(Boolean)
         .join('\n\n')
       await window.api.postReview({
+        account: pr.account,
         repo: pr.repo,
         number: pr.number,
         headSha: draft.headSha,
@@ -710,7 +688,7 @@ export function PrView({ pr, progress, onDraftChanged }: Props) {
       clearTimeout(saveTimer.current)
       saveTimer.current = null
     }
-    await window.api.discardDraft(pr.key, why)
+    await window.api.discardDraft(pr.account, pr.key, why)
     setDraft(null)
     latest.current = null
     stored.current = false
@@ -719,47 +697,87 @@ export function PrView({ pr, progress, onDraftChanged }: Props) {
   }
 
   const startReview = (withFocus: string = focus, mode: 'replace' | 'extend' = 'replace'): void => {
+    // Sending empties the box and shows what was asked above, the way a question does in Ask Claude.
+    const sent = withFocus.trim()
+    setAsked(sent)
+    setFocus('')
+    setStarting(true)
+    const failed = (): void => {
+      setStarting(false)
+      setFocus((f) => f || sent)
+    }
     // Claude reads the draft from disk when it starts adding to it, so save what is typed first.
     if (mode === 'extend' && saveTimer.current && latest.current) {
       clearTimeout(saveTimer.current)
       saveTimer.current = null
-      void window.api.saveDraft(latest.current).then(() => window.api.startReview(pr, withFocus, mode))
+      void window.api
+        .saveDraft(latest.current)
+        .then(() => window.api.startReview(pr, withFocus, mode))
+        .catch(failed)
       return
     }
-    void window.api.startReview(pr, withFocus, mode)
+    void window.api.startReview(pr, withFocus, mode).catch(failed)
   }
-  const copyBranch = (): void =>
-    void window.api.copyText(pr.headRef).then(() => {
-      setBranchCopied(true)
-      setTimeout(() => setBranchCopied(false), 1500)
+  const copyBranch = (branch: string): void =>
+    void window.api.copyText(branch).then(() => {
+      setBranchCopied(branch)
+      setTimeout(() => setBranchCopied(null), 1500)
     })
-  const jump = (id: string): void =>
-    document.getElementById(id)?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  /** A branch as a chip that stands out from the line around it. Clicking it copies the name. */
+  const branchChip = (branch: string, what: string) => (
+    <Button
+      variant="outline"
+      size="xs"
+      className="mono h-6 max-w-full min-w-0 shrink gap-1.5 border-primary/30 bg-tint px-2 font-medium text-foreground hover:border-primary/60 hover:bg-tint dark:border-primary/40 dark:bg-tint dark:hover:bg-tint"
+      title={`${what}: ${branch}. Click to copy the name.`}
+      onClick={() => copyBranch(branch)}
+    >
+      <GitBranch className="text-primary" aria-hidden />
+      <span className="min-w-0 truncate">{branch}</span>
+      {branchCopied === branch ? <Check className="text-ready" aria-hidden /> : <Copy className="text-muted-foreground" aria-hidden />}
+    </Button>
+  )
+  /** Scrolls the changed files to an element, or to `fallback` when that one is folded away. */
+  const jump = useCallback(
+    (id: string, fallback?: string): void => {
+      showPage('files')
+      // The files page keeps its layout while the conversation is showing, so it can scroll as soon as it is back.
+      requestAnimationFrame(() =>
+        (document.getElementById(id) ?? (fallback ? document.getElementById(fallback) : null))?.scrollIntoView({
+          block: 'center',
+          behavior: 'smooth'
+        })
+      )
+    },
+    [showPage]
+  )
+  const locate = useCallback(
+    (thread: Thread) => jump(`t-${thread.id}`, `f-${parsed.findIndex(({ file }) => file.path === thread.comments[0].path)}`),
+    [jump, parsed]
+  )
 
   return (
     <div className="pr-view">
       <header className="pr-head">
         <div className="min-w-0 flex-1">
           <h1>{pr.title}</h1>
-          <p className="pr-meta">
+          {/* Who wants to merge what into where, the way GitHub words it; the branches are chips so they are found at a glance. */}
+          <p className="pr-meta items-center gap-x-2 gap-y-1.5 text-[13px]">
             <span className="mono">
               {pr.repo}#{pr.number}
             </span>
-            <span className="inline-flex items-center gap-1.5">
-              by <Author author={pr.author} className="font-medium text-foreground" />
+            <span className="inline-flex items-center gap-2 whitespace-nowrap">
+              <Author author={pr.author} className="font-semibold text-foreground [&>img]:size-5" />
+              wants to merge
             </span>
-            <span className="inline-flex items-center gap-1">
-              <Button
-                variant="ghost"
-                size="xs"
-                className="mono h-auto px-1 py-0.5 font-normal text-muted-foreground hover:text-foreground"
-                title="Copy branch name"
-                onClick={copyBranch}
-              >
-                {pr.headRef}
-                {branchCopied ? <Check className="text-ready" aria-hidden /> : <Copy aria-hidden />}
-              </Button>
-              <span className="mono">into {pr.baseRef}</span>
+            {branchChip(pr.headRef, 'The branch with the changes')}
+            {/* Kept together, so a long branch name never leaves "into" on one line and its target on the next. */}
+            <span className="inline-flex min-w-0 items-center gap-2">
+              <span className="inline-flex shrink-0 items-center gap-1">
+                <ArrowRight className="size-3.5" aria-hidden />
+                into
+              </span>
+              {branchChip(pr.baseRef, 'The branch it merges into')}
             </span>
             {pr.reasons.map((r, i) => (
               <span key={i} className={`reason level-${r.level}`}>
@@ -797,12 +815,62 @@ export function PrView({ pr, progress, onDraftChanged }: Props) {
         </div>
       )}
 
+      <SelectionContext.Provider value={selection}>
       <ResizablePanelGroup
         orientation="horizontal"
         className="min-h-0 flex-1"
         defaultLayout={layout.defaultLayout}
         onLayoutChanged={layout.onLayoutChanged}
       >
+        <ResizablePanel id="pages" minSize={440}>
+        <Tabs value={page} onValueChange={(v) => showPage(v === 'files' ? 'files' : 'conversation')} className="h-full gap-0">
+          <div className="flex items-center gap-3 border-b px-3">
+            <TabsList variant="line" className="shrink-0">
+              <TabsTrigger value="conversation">
+                <MessagesSquare aria-hidden />
+                Conversation
+                {conversations.open > 0 && (
+                  <Badge variant="outline" className="border-action/50 px-1.5 font-semibold text-action" title={`${conversations.open} unresolved`}>
+                    {conversations.open}
+                  </Badge>
+                )}
+              </TabsTrigger>
+              <TabsTrigger value="files">
+                <FileDiffIcon aria-hidden />
+                Files changed
+                <Badge variant="secondary" className="px-1.5 tabular-nums">
+                  {detail?.files.length ?? pr.changedFiles}
+                </Badge>
+              </TabsTrigger>
+            </TabsList>
+            {/* Review feedback as markdown, ready to paste to Claude. Works from either page. */}
+            <Button
+              variant="outline"
+              size="xs"
+              className="ml-auto"
+              disabled={!unresolved.length}
+              title={
+                unresolved.length
+                  ? 'Copy every unresolved conversation as markdown, with its file, lines and code. To copy only some, ⌘-click them.'
+                  : 'No unresolved conversations'
+              }
+              onClick={() => copy(unresolved)}
+            >
+              <Copy aria-hidden />
+              Copy unresolved{unresolved.length ? ` (${unresolved.length})` : ''}
+            </Button>
+          </div>
+          {/* Both pages stay mounted and laid out, so each keeps its scroll position and half-written comments. */}
+          <div className="relative min-h-0 flex-1">
+          <TabsContent value="conversation" forceMount className="absolute inset-0 data-[state=inactive]:invisible">
+            {detail ? (
+              <Conversation pr={pr} detail={detail} threads={threads} onLocate={locate} />
+            ) : (
+              !loadError && <div className="empty">Loading the conversation…</div>
+            )}
+          </TabsContent>
+          <TabsContent value="files" forceMount className="absolute inset-0 data-[state=inactive]:invisible">
+          <ResizablePanelGroup orientation="horizontal" defaultLayout={filesLayout.defaultLayout} onLayoutChanged={filesLayout.onLayoutChanged}>
         <ResizablePanel id="files" defaultSize={220} minSize={120} maxSize={480}>
           <FileTree files={detail?.files ?? EMPTY_FILES} counts={commentCounts} viewed={viewed} discussion={discussion} onJump={(n) => jump(`f-${n}`)} />
         </ResizablePanel>
@@ -816,15 +884,14 @@ export function PrView({ pr, progress, onDraftChanged }: Props) {
               This pull request has more files than Docket loads. The rest are on GitHub.
             </div>
           )}
-          {detail?.bodyHtml && <Description html={detail.bodyHtml} url={pr.url} />}
           {parsed.map(({ file, rows }, i) => (
             <FileDiff
               key={file.path}
               index={i}
               file={file}
               rows={rows}
-              drafts={byFile.drafts.get(file.path) ?? EMPTY_DRAFTS}
-              existing={byFile.existing.get(file.path) ?? EMPTY_EXISTING}
+              drafts={draftsByFile.get(file.path) ?? EMPTY_DRAFTS}
+              threads={threadsByFile.get(file.path) ?? EMPTY_THREADS}
               readOnly={readOnly}
               viewed={viewed.has(file.path)}
               onViewed={onViewed}
@@ -834,6 +901,21 @@ export function PrView({ pr, progress, onDraftChanged }: Props) {
             />
           ))}
         </main>
+        </ResizablePanel>
+          </ResizablePanelGroup>
+          </TabsContent>
+          {picked.length > 0 && (
+            <SelectionBar
+              className="absolute"
+              count={picked.length}
+              label="Copy as markdown"
+              icon={Copy}
+              onCopy={copySelected}
+              onClear={() => setSelected(new Set())}
+            />
+          )}
+          </div>
+        </Tabs>
         </ResizablePanel>
         <ResizableHandle />
 
@@ -868,10 +950,19 @@ export function PrView({ pr, progress, onDraftChanged }: Props) {
           ) : (
           <>
           {running && (
-            <p className="flex items-center gap-2 text-xs text-muted-foreground">
-              <span className="spinner" aria-hidden />
-              {progress!.step}
-            </p>
+            <div className="grid gap-3">
+              {asked && <Asked>{asked}</Asked>}
+              <div className="grid gap-1 rounded-lg border bg-background px-3 py-2.5" role="status">
+                <p className="flex items-center gap-2 font-medium">
+                  <span className="spinner" aria-hidden />
+                  {real ? 'Claude is reviewing again' : 'Claude is reviewing this pull request'}
+                </p>
+                <p className="text-xs break-words text-muted-foreground">{progress?.state === 'running' ? progress.step : 'Starting'}</p>
+                <p className="text-xs text-muted-foreground">
+                  The draft shows up here when it is done. You can keep reading in the meantime.
+                </p>
+              </div>
+            </div>
           )}
           {progress?.state === 'done' && progress.step !== 'Review drafted' && (
             <p className="text-xs text-muted-foreground" role="status">
@@ -1009,7 +1100,14 @@ export function PrView({ pr, progress, onDraftChanged }: Props) {
               ) : confirming ? (
                 <div className="grid gap-2 rounded-lg border bg-background p-3">
                   <p>
-                    Post to {pr.repo}#{pr.number} as <strong>{VERDICT_LABEL[draft.verdict]}</strong> with{' '}
+                    Post to {pr.repo}#{pr.number}
+                    {pr.account && (
+                      <>
+                        {' '}
+                        from <strong>{pr.account}</strong>
+                      </>
+                    )}{' '}
+                    as <strong>{VERDICT_LABEL[draft.verdict]}</strong> with{' '}
                     {toPost.length} {toPost.length === 1 ? 'comment' : 'comments'}? {pr.author.login} and other watchers
                     will be notified.
                   </p>
@@ -1052,10 +1150,12 @@ export function PrView({ pr, progress, onDraftChanged }: Props) {
               onChange={setFocus}
               running={running}
               allowEmpty
-              onStop={() => void window.api.cancelReview(pr.key)}
+              onStop={() => void window.api.cancelReview(pr.account, pr.key)}
               onSubmit={() => (real ? setRerunning(true) : startReview())}
               submitLabel={real ? 'Run again' : 'Review'}
-              placeholder={real ? 'Anything to focus on this time? (optional)' : 'Anything to focus on? (optional)'}
+              placeholder={
+                running ? 'Claude is reviewing…' : real ? 'Anything to focus on this time? (optional)' : 'Anything to focus on? (optional)'
+              }
               above={
                 <Shortcuts
                   items={REVIEW_FOCUS}
@@ -1106,13 +1206,14 @@ export function PrView({ pr, progress, onDraftChanged }: Props) {
         </Tabs>
         </ResizablePanel>
       </ResizablePanelGroup>
+      </SelectionContext.Provider>
     </div>
   )
 }
 
 const EMPTY_FILES: PrFile[] = []
 const EMPTY_DRAFTS: DraftComment[] = []
-const EMPTY_EXISTING: ExistingComment[] = []
+const EMPTY_THREADS: Thread[] = []
 
 /** Ready-made focus for a review: one click puts it in the box, ready to send or edit. */
 const REVIEW_FOCUS: Shortcut[] = [

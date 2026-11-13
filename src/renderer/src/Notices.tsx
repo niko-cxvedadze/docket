@@ -32,14 +32,19 @@ const LOOK: Record<NoticeKind, { Icon: LucideIcon; className: string }> = {
 }
 
 /**
- * The bell in the top bar: every notification Docket has shown, newest first, and what the number
- * on the dock icon is counting. New notifications pop up as a toast while the window is in front.
+ * The bell in the top bar: every notification Docket has shown for the account on screen, newest
+ * first. Each account has its own list. New notifications pop up as a toast while the window is
+ * in front, whichever account they are for, and opening one switches to its account.
  */
 export function Notices({
+  account,
   prs,
   current,
   onOpen
 }: {
+  /** The account on screen; null until the first list has arrived. */
+  account: string | null
+  /** Every account's pull requests, so a notice for another account can still be opened. */
   prs: PrSummary[]
   /** The pull request on screen; no toast about it, since the page already shows the change. */
   current: string | null
@@ -48,22 +53,28 @@ export function Notices({
   const [notices, setNotices] = useState<Notice[]>([])
   const [open, setOpen] = useState(false)
   // The listeners are set up once; these keep them reading the latest values.
-  const latest = useRef({ prs, current, onOpen })
-  latest.current = { prs, current, onOpen }
+  const latest = useRef({ account, prs, current, onOpen })
+  latest.current = { account, prs, current, onOpen }
 
   const show = (n: Notice): void => {
     const { prs, onOpen } = latest.current
-    const pr = n.prKey ? prs.find((p) => p.key === n.prKey) : undefined
+    const pr = n.prKey ? prs.find((p) => p.key === n.prKey && (!n.account || p.account === n.account)) : undefined
     if (pr) onOpen(pr)
     else if (n.prUrl) void window.api.openExternal(n.prUrl)
   }
 
+  // Another account, another list.
   useEffect(() => {
-    void window.api.listNotices().then(setNotices, () => undefined)
+    setNotices([])
+    if (account) void window.api.listNotices(account).then(setNotices, () => undefined)
+  }, [account])
+
+  useEffect(() => {
     const offNew = window.api.onNotice((n) => {
-      setNotices((all) => [n, ...all].slice(0, 100))
-      if (n.prKey && n.prKey === latest.current.current) return
-      toast(n.title, {
+      const here = !n.account || n.account === latest.current.account
+      if (here) setNotices((all) => [n, ...all].slice(0, 100))
+      if (here && n.prKey && n.prKey === latest.current.current) return
+      toast(here ? n.title : `${n.account}: ${n.title}`, {
         description: n.body.split('\n').slice(0, 3).join('\n'),
         duration: 6000,
         action: n.prKey || n.prUrl ? { label: 'Open', onClick: () => show(n) } : undefined
@@ -81,6 +92,7 @@ export function Notices({
   const unread = notices.filter((n) => !n.read).length
   const needs = prs.filter((p) => p.level !== 'waiting')
   const mine = needs.filter((p) => p.role === 'mine').length
+  const several = new Set(prs.map((p) => p.account)).size > 1
 
   return (
     <Popover
@@ -90,7 +102,7 @@ export function Notices({
         // Opening the list counts as seeing everything in it.
         if (o && unread) {
           setNotices((all) => all.map((n) => ({ ...n, read: true })))
-          void window.api.markNoticesRead()
+          if (account) void window.api.markNoticesRead(account)
         }
       }}
     >
@@ -109,8 +121,9 @@ export function Notices({
           <p className="text-sm font-semibold">Notifications</p>
           <p className="mt-0.5 text-xs text-muted-foreground">
             {needs.length
-              ? `The dock icon shows ${needs.length}: pull requests that need you or are ready to merge (${mine} of yours, ${needs.length - mine} to review).`
+              ? `The dock icon shows ${needs.length}: pull requests that need you or are ready to merge (${mine} of yours, ${needs.length - mine} to review)${several ? ', across every account' : ''}.`
               : 'Nothing needs you right now, so the dock icon shows no number.'}
+            {several && account ? ` This list is ${account}'s.` : ''}
           </p>
         </div>
         <ul className="max-h-[60vh] overflow-auto">

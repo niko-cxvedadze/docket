@@ -105,19 +105,19 @@ function RerunNote({ rerun }: { rerun: RerunState }) {
   return null
 }
 
-function CheckRow({ repo, check, label, pr }: { repo: string; check: FailingCheck; label: string; pr: CiProps }) {
+function CheckRow({ check, label, pr }: { check: FailingCheck; label: string; pr: PrSummary }) {
   const [open, setOpen] = useState(false)
   const [log, setLog] = useState<LogState | null>(null)
   const blocking = blocks(check, pr)
   const Icon = blocking ? CircleX : CircleAlert
   const jobId = check.jobId
-  const [rerun, startRerun] = useRerun(() => window.api.rerunJob(repo, jobId!))
+  const [rerun, startRerun] = useRerun(() => window.api.rerunJob(pr.account, pr.repo, jobId!))
 
   const toggle = (): void => {
     setOpen(!open)
     if (log || check.jobId === null) return
     setLog({ state: 'loading' })
-    window.api.checkLog(repo, check.jobId).then(
+    window.api.checkLog(pr.account, pr.repo, check.jobId).then(
       (l) => setLog({ state: 'done', log: l }),
       (e) => setLog({ state: 'error', error: cleanError(e) })
     )
@@ -180,8 +180,8 @@ function CheckRow({ repo, check, label, pr }: { repo: string; check: FailingChec
 }
 
 /** One workflow's failed jobs under its name, with a button that re-runs them all. */
-function WorkflowGroup({ repo, group, pr }: { repo: string; group: CheckGroup; pr: CiProps }) {
-  const [rerun, startRerun] = useRerun(() => window.api.rerunFailedJobs(repo, group.runIds))
+function WorkflowGroup({ group, pr }: { group: CheckGroup; pr: PrSummary }) {
+  const [rerun, startRerun] = useRerun(() => window.api.rerunFailedJobs(pr.account, pr.repo, group.runIds))
   const runUrl = group.checks.find((c) => c.check.url)?.check.url?.replace(/\/job\/\d+.*$/, '')
   const n = group.checks.length
   return (
@@ -203,7 +203,7 @@ function WorkflowGroup({ repo, group, pr }: { repo: string; group: CheckGroup; p
       </div>
       <ul className="ml-1 grid gap-1 border-l pl-3">
         {group.checks.map(({ check, label }, i) => (
-          <CheckRow key={check.url ?? `${check.name}-${i}`} repo={repo} check={check} label={label} pr={pr} />
+          <CheckRow key={check.url ?? `${check.name}-${i}`} check={check} label={label} pr={pr} />
         ))}
       </ul>
     </li>
@@ -214,7 +214,7 @@ function WorkflowGroup({ repo, group, pr }: { repo: string; group: CheckGroup; p
 export function CiDetails({ pr, className }: { pr: PrSummary; className?: string }) {
   // Lists saved by older versions have no run ids; those checks simply cannot be re-run from here.
   const runIds = [...new Set(pr.failingChecks.map((c) => c.runId).filter((id): id is number => id != null))]
-  const [rerun, startRerun] = useRerun(() => window.api.rerunFailedJobs(pr.repo, runIds))
+  const [rerun, startRerun] = useRerun(() => window.api.rerunFailedJobs(pr.account, pr.repo, runIds))
   if (pr.ci === 'none') return null
   if (pr.ci !== 'failure')
     return (
@@ -265,9 +265,9 @@ export function CiDetails({ pr, className }: { pr: PrSummary; className?: string
           <ul className="grid max-h-[40vh] gap-2 overflow-auto">
             {groupChecks(pr.failingChecks).map((g) =>
               g.workflow ? (
-                <WorkflowGroup key={g.key} repo={pr.repo} group={g} pr={pr} />
+                <WorkflowGroup key={g.key} group={g} pr={pr} />
               ) : (
-                <CheckRow key={g.key} repo={pr.repo} check={g.checks[0].check} label={g.checks[0].label} pr={pr} />
+                <CheckRow key={g.key} check={g.checks[0].check} label={g.checks[0].label} pr={pr} />
               )
             )}
           </ul>

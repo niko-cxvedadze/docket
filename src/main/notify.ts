@@ -2,7 +2,8 @@ import { app, BrowserWindow, Notification } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import type { Notice, NoticeKind, PrSummary } from '../shared/types'
+import { enabledAccountsIfKnown, legacyOwner } from './accounts'
+import { prId, shortName, type Notice, type NoticeKind, type PrSummary } from '../shared/types'
 
 /**
  * Everything Docket tells the user about: shown as a macOS notification while the window is in the
@@ -37,16 +38,17 @@ export function setNoticeWindow(get: () => BrowserWindow | null): void {
   getWindow = get
 }
 
-export const listNotices = (): Notice[] => load()
+/** One account's notices: each account has its own bell. One from before accounts were kept apart goes by the pull request it is about. */
+export const listNotices = (account: string): Notice[] => load().filter((n) => (n.account ?? legacyOwner(n.prKey)) === account)
 
-export function markNoticesRead(): void {
+export function markNoticesRead(account: string): void {
   let changed = false
-  for (const n of load()) if (!n.read) (n.read = true), (changed = true)
+  for (const n of listNotices(account)) if (!n.read) (n.read = true), (changed = true)
   if (changed) persist()
 }
 
-export function notify(kind: NoticeKind, title: string, body: string, prKey?: string, prUrl?: string): void {
-  const notice: Notice = { id: randomUUID(), at: new Date().toISOString(), kind, title, body, prKey, prUrl, read: false }
+export function notify(kind: NoticeKind, title: string, body: string, account: string | undefined, prKey?: string, prUrl?: string): void {
+  const notice: Notice = { id: randomUUID(), at: new Date().toISOString(), kind, title, body, account, prKey, prUrl, read: false }
   const all = load()
   all.unshift(notice)
   all.splice(MAX_NOTICES)
@@ -55,7 +57,9 @@ export function notify(kind: NoticeKind, title: string, body: string, prKey?: st
   win?.webContents.send('notice', notice)
   // In front, the window shows a toast; behind, macOS shows the notification.
   if (win?.isFocused() || !Notification.isSupported()) return
-  const n = new Notification({ title, body })
+  // With several accounts, macOS says which one it is about; the window may be showing another.
+  const several = (enabledAccountsIfKnown()?.length ?? 1) > 1
+  const n = new Notification({ title, body, subtitle: several ? account : undefined })
   n.on('click', () => {
     const w = getWindow()
     if (!w) return
@@ -70,21 +74,26 @@ export function notify(kind: NoticeKind, title: string, body: string, prKey?: st
 // ---------- Changes between two dashboard refreshes ----------
 
 let previous: Map<string, PrSummary> | null = null
-const short = (pr: PrSummary): string => `${pr.repo.split('/')[1]}#${pr.number} ${pr.title}`
+// Two accounts can each list the same pull request; each copy is followed on its own.
+const copyOf = (pr: PrSummary): string => prId(pr.account, pr.key)
+const short = (pr: PrSummary): string => `${shortName(pr)} ${pr.title}`
 const list = (names: string[]): string => (names.length ? names.join(', ') : 'a reviewer')
 
-/** Compares the new list with the last one and tells the user what changed for them. */
-export function noticeChanges(prs: PrSummary[]): void {
-  const before = previous
-  previous = new Map(prs.map((p) => [p.key, p]))
+/**
+ * Compares the new list with the last one and tells the user what changed for them. `restart` makes
+ * this list the new starting point: after an account is switched on, its pull requests are not news.
+ */
+export function noticeChanges(prs: PrSummary[], restart = false): void {
+  const before = restart ? null : previous
+  previous = new Map(prs.map((p) => [copyOf(p), p]))
   if (!before) return // the first list after launch is the starting point, not news
 
   const fresh: PrSummary[] = []
   for (const pr of prs) {
-    const was = before.get(pr.key)
+    const was = before.get(copyOf(pr))
     let told = false
     const say = (kind: NoticeKind, title: string): void => {
-      notify(kind, title, short(pr), pr.key, pr.url)
+      notify(kind, title, short(pr), pr.account, pr.key, pr.url)
       told = true
     }
     if (pr.role === 'mine' && was) {
@@ -101,10 +110,14 @@ export function noticeChanges(prs: PrSummary[]): void {
     const neededBefore = !!was && was.level !== 'waiting'
     if (needsNow && !neededBefore && !told) fresh.push(pr)
   }
-  if (fresh.length === 1) {
-    const pr = fresh[0]
-    notify('needs-you', pr.reasons[0]?.text ?? 'Needs you', short(pr), pr.key, pr.url)
-  } else if (fresh.length > 1) {
-    notify('needs-you', `${fresh.length} pull requests need you`, fresh.map(short).join('\n'))
+  // Told per account, so each account's bell holds only its own.
+  for (const account of new Set(fresh.map((p) => p.account))) {
+    const theirs = fresh.filter((p) => p.account === account)
+    if (theirs.length === 1) {
+      const pr = theirs[0]
+      notify('needs-you', pr.reasons[0]?.text ?? 'Needs you', short(pr), account, pr.key, pr.url)
+    } else {
+      notify('needs-you', `${theirs.length} pull requests need you`, theirs.map(short).join('\n'), account)
+    }
   }
 }
